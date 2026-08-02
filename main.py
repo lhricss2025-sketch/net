@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 import aiohttp
 import requests
-from libsql_experimental import libsql
+import libsql_experimental as libsql
 from telegram import (
     Update,
     InlineKeyboardButton,
