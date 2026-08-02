@@ -41,8 +41,8 @@ TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "your-auth-token")
 ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "123456789").split(",")]
 
 FORCE_JOIN_CHANNELS = [
-    {"id": "Premium Stuff", "link": "https://t.me/+wRaWDUT9DB41ZWE0"},
-    {"id": "Official_Channel", "link": "https://t.me/Senzo_Official"},
+    {"id": "-3774536485", "link": "https://t.me/+wRaiiDUT9DB41ZiVE9"},
+    {"id": "@Senzo_Official", "link": "https://t.me/Senzo_Official"},
 ]
 
 WORKING_COOLDOWN_MINUTES = 10
