@@ -5,9 +5,19 @@ import re
 import random
 import string
 import time
+import ssl
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
+
+# Fix for Railway asyncio issues
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
+# Fix SSL for Railway
+ssl._create_default_https_context = ssl._create_unverified_context
 
 import aiohttp
 import requests
@@ -50,6 +60,21 @@ MAX_ACCOUNTS_PER_USER = 3
 REPORT_TIMEOUT_MINUTES = 30
 
 # ============================================================
+# DATABASE WITH RETRY LOGIC
+# ============================================================
+def get_db_with_retry():
+    max_retries = 5
+    for i in range(max_retries):
+        try:
+            db = Database()
+            print(f"✅ Database connected successfully!")
+            return db
+        except Exception as e:
+            print(f"⚠️ DB connection attempt {i+1} failed: {e}")
+            time.sleep(3)
+    raise Exception("❌ Could not connect to database after multiple attempts")
+
+# ============================================================
 # TURSO DATABASE CONNECTION
 # ============================================================
 class Database:
@@ -62,11 +87,15 @@ class Database:
         return cls._instance
     
     def _initialize(self):
-        self.conn = libsql.connect(
-            TURSO_DATABASE_URL,
-            auth_token=TURSO_AUTH_TOKEN
-        )
-        self._init_tables()
+        try:
+            self.conn = libsql.connect(
+                TURSO_DATABASE_URL,
+                auth_token=TURSO_AUTH_TOKEN
+            )
+            self._init_tables()
+        except Exception as e:
+            print(f"❌ Database init error: {e}")
+            raise
     
     def _init_tables(self):
         # Users table
@@ -196,7 +225,7 @@ class Database:
 # ============================================================
 # DATABASE HELPERS
 # ============================================================
-db = Database()
+db = get_db_with_retry()
 
 def get_user(user_id: int) -> Optional[Dict]:
     result = db.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
@@ -1857,7 +1886,22 @@ def main():
     # Error handler
     application.add_error_handler(error_handler)
     
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Start with Railway compatibility
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        print(f"⚠️ Polling error: {e}, trying webhook mode...")
+        try:
+            port = int(os.getenv("PORT", 8080))
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                url_path=BOT_TOKEN,
+                webhook_url=f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN', '')}/{BOT_TOKEN}"
+            )
+        except:
+            print("❌ Both polling and webhook failed")
+            raise
 
 if __name__ == "__main__":
     main()
