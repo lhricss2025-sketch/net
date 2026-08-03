@@ -88,6 +88,7 @@ FORCE_JOIN_CHANNELS = [
     {"id": "@Senzo_Official", "link": "https://t.me/Senzo_Official"},
 ]
 
+
 WORKING_COOLDOWN_MINUTES = 10
 MAX_ACCOUNTS_PER_USER = 3
 REPORT_TIMEOUT_MINUTES = 30
@@ -918,6 +919,23 @@ def check_account(cookies: List[Dict]) -> Dict:
 # TELEGRAM BOT HANDLERS
 # ============================================================
 
+def clean_channel_id(ch_id: str):
+    if not ch_id:
+        return None
+    ch_id = ch_id.strip()
+    if ch_id.startswith("-100") or (ch_id.startswith("-") and ch_id[1:].isdigit()) or ch_id.isdigit():
+        try:
+            return int(ch_id)
+        except ValueError:
+            return ch_id
+    if ch_id.startswith("@"):
+        return ch_id
+    if "t.me/" in ch_id and not "/+" in ch_id:
+        username = ch_id.split("t.me/")[-1].strip("/")
+        if username and not username.startswith("+"):
+            return f"@{username}"
+    return None
+
 async def check_force_join(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     channels = get_channels()
     channels = [c for c in channels if c["is_active"]]
@@ -926,14 +944,22 @@ async def check_force_join(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
         return True
     
     for channel in channels:
+        raw_id = channel.get("channel_id", "")
+        target_id = clean_channel_id(raw_id)
+        if not target_id:
+            print(f"⚠️ Channel ID '{raw_id}' is invalid format for get_chat_member. Expected @username or numeric ID (-100xxx). Skipping.")
+            continue
+            
         try:
-            member = await context.bot.get_chat_member(channel["channel_id"], user_id)
+            member = await context.bot.get_chat_member(target_id, user_id)
             if member.status in [ChatMember.LEFT, ChatMember.KICKED]:
                 return False
-        except Exception:
-            return False
+        except Exception as e:
+            print(f"⚠️ Could not check member status for channel '{raw_id}' (target: {target_id}): {e}")
+            continue
     
     return True
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1029,15 +1055,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     user_id = query.from_user.id
     
     joined = await check_force_join(user_id, context)
     if joined:
+        try:
+            await query.answer("✅ Verified!")
+        except Exception:
+            pass
         await query.edit_message_text("✅ You've joined all channels! Starting bot...")
         await start(update, context)
     else:
-        await query.answer("❌ You haven't joined all channels yet!", show_alert=True)
+        try:
+            await query.answer("❌ You haven't joined all channels yet! Please join and try again.", show_alert=True)
+        except Exception:
+            pass
+
 
 async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
