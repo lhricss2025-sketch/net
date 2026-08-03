@@ -1837,6 +1837,28 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 # ============================================================
+# HEALTH CHECK SERVER FOR RAILWAY
+# ============================================================
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'OK')
+    
+    def log_message(self, format, *args):
+        pass  # Suppress logs to avoid spam
+
+def start_health_server():
+    port = int(os.getenv('PORT', 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    print(f"✅ Health check server running on port {port}")
+    server.serve_forever()
+
+# ============================================================
 # MAIN
 # ============================================================
 def main():
@@ -1886,22 +1908,20 @@ def main():
     # Error handler
     application.add_error_handler(error_handler)
     
-    # Start with Railway compatibility
+    # Start bot polling
     try:
+        print("🚀 Starting bot polling...")
         application.run_polling(allowed_updates=Update.ALL_TYPES)
     except Exception as e:
-        print(f"⚠️ Polling error: {e}, trying webhook mode...")
-        try:
-            port = int(os.getenv("PORT", 8080))
-            application.run_webhook(
-                listen="0.0.0.0",
-                port=port,
-                url_path=BOT_TOKEN,
-                webhook_url=f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN', '')}/{BOT_TOKEN}"
-            )
-        except:
-            print("❌ Both polling and webhook failed")
-            raise
+        print(f"⚠️ Polling error: {e}")
 
 if __name__ == "__main__":
+    # Start health check server first
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
+    
+    # Small delay to ensure health server starts
+    time.sleep(1)
+    
+    # Run the bot
     main()
