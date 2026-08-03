@@ -85,7 +85,6 @@ for aid in admin_ids_str.split(","):
         ADMIN_IDS.append(int(clean_id))
 
 FORCE_JOIN_CHANNELS = [
-    {"id": "Premium Stuff", "link": "https://t.me/+wRaiiDUT9DB41ZiVE9"},
     {"id": "@Senzo_Official", "link": "https://t.me/Senzo_Official"},
 ]
 
