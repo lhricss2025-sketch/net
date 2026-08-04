@@ -1064,7 +1064,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "STANDARD": "⭐",
         "BASIC": "🎯",
         "MOBILE": "📱",
-        "FREE": "🆓"
+        "FREE": "🆓",
+        "STANDARD_WITH_ADS": "📺"
     }
     
     plan_display = ""
@@ -1157,7 +1158,7 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("❌ You haven't joined all channels yet!", show_alert=True)
 
 # ============================================================
-# GET ACCOUNT - SMART COOKIE + ALL 3 BUTTONS
+# GET ACCOUNT - FULLY FIXED WITH ALL BUTTONS FOR EVERY ACCOUNT
 # ============================================================
 
 async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1238,23 +1239,29 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = []
         
-        # Phone + PC buttons (same as before)
-        if account.get("nftoken"):
-            token = account['nftoken']
+        # === FIXED: ALWAYS show login buttons for EVERY account ===
+        token = account.get('nftoken')
+        
+        if token and token != "None" and len(str(token)) > 10:
+            # NFToken exists - show login buttons with token
             keyboard.append([
                 InlineKeyboardButton("📱 Phone Login", url=f"https://netflix.com/unsupported?nftoken={token}"),
                 InlineKeyboardButton("🖥️ PC Login", url=f"https://netflix.com/login?nftoken={token}")
             ])
-            # TV Login - separate button below
             keyboard.append([
                 InlineKeyboardButton("📺 TV Login", url=f"https://netflix.com/tv8?nftoken={token}")
             ])
             if account.get("nftoken_expiry"):
                 text += f"\n⏳ NFToken expires: `{account['nftoken_expiry']}`"
         else:
+            # No NFToken - show cookie method with direct Netflix links
             keyboard.append([
                 InlineKeyboardButton("🔑 Use Cookie Method", url="https://www.netflix.com/login")
             ])
+            keyboard.append([
+                InlineKeyboardButton("🌐 Open Netflix", url="https://www.netflix.com")
+            ])
+            text += "\n\n💡 **Use the cookie above** with a cookie editor extension to login."
         
         text += "\n\n✅ **After testing, report below:**"
         keyboard.append([
