@@ -657,7 +657,6 @@ def generate_nftoken(netflix_id: str, attempts: int = 3) -> Tuple[Optional[str],
                 if token:
                     return token, expires
             
-            # Wait before retry
             time.sleep(0.5)
             
         except Exception as e:
@@ -923,12 +922,9 @@ def check_account_full(cookies_dict: Dict) -> Dict:
             
             is_subscribed = plan_key != "FREE" or (membership_status and "current_member" in membership_status.lower())
             
-            # ============================================================
-            # FIXED: Generate NFToken for ALL accounts (FREE + PAID)
-            # ============================================================
+            # Generate NFToken for ALL accounts (FREE + PAID)
             nftoken = None
             nftoken_expiry = None
-            # Try to generate NFToken for EVERY account
             nftoken, nftoken_expiry = generate_nftoken(cookies_dict.get("NetflixId"), attempts=3)
             
             return {
@@ -1178,7 +1174,7 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("❌ You haven't joined all channels yet!", show_alert=True)
 
 # ============================================================
-# GET ACCOUNT - FULLY FIXED WITH NFToken FOR ALL ACCOUNTS
+# GET ACCOUNT - ALWAYS SHOW LOGIN BUTTONS
 # ============================================================
 
 async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1221,7 +1217,6 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     account = accounts[0]
     if assign_account(user_id, account["id"]):
         
-        # SMART COOKIE - only truncate if too long (3900+ chars)
         cookie_full = account.get('cookies', 'No cookies available')
         if len(cookie_full) > 3900:
             cookie_display = cookie_full[:3900] + "\n\n... (cookie truncated due to length)"
@@ -1259,11 +1254,10 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = []
         
-        # === FIXED: ALWAYS try to show NFToken buttons for ALL accounts ===
         token = account.get('nftoken')
         
+        # ALWAYS show login buttons - with or without token
         if token and token != "None" and len(str(token)) > 10:
-            # NFToken exists - show login buttons with token
             keyboard.append([
                 InlineKeyboardButton("📱 Phone Login", url=f"https://netflix.com/unsupported?nftoken={token}"),
                 InlineKeyboardButton("🖥️ PC Login", url=f"https://netflix.com/login?nftoken={token}")
@@ -1274,12 +1268,13 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if account.get("nftoken_expiry"):
                 text += f"\n⏳ NFToken expires: `{account['nftoken_expiry']}`"
         else:
-            # No NFToken - show cookie method + direct Netflix links
+            # No token - still show login buttons (direct links)
             keyboard.append([
-                InlineKeyboardButton("🔑 Use Cookie Method", url="https://www.netflix.com/login")
+                InlineKeyboardButton("📱 Phone Login", url="https://netflix.com/unsupported"),
+                InlineKeyboardButton("🖥️ PC Login", url="https://netflix.com/login")
             ])
             keyboard.append([
-                InlineKeyboardButton("🌐 Open Netflix", url="https://www.netflix.com")
+                InlineKeyboardButton("📺 TV Login", url="https://netflix.com/tv8")
             ])
             text += "\n\n💡 **Use the cookie above** with a cookie editor extension to login."
         
