@@ -622,7 +622,7 @@ def log_daily_stats(hits: int = 0, free: int = 0, bad: int = 0):
         pass
 
 # ============================================================
-# NFToken Generator - IMPROVED WITH RETRY
+# NFToken Generator
 # ============================================================
 NFTOKEN_API_URL = "https://ios.prod.ftl.netflix.com/iosui/user/15.48"
 NFTOKEN_HEADERS = {
@@ -632,7 +632,6 @@ NFTOKEN_HEADERS = {
 }
 
 def generate_nftoken(netflix_id: str, attempts: int = 3) -> Tuple[Optional[str], Optional[str]]:
-    """Generate NFToken with retry logic for ALL accounts."""
     if not netflix_id:
         return None, None
     
@@ -1174,7 +1173,7 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("❌ You haven't joined all channels yet!", show_alert=True)
 
 # ============================================================
-# GET ACCOUNT - ALWAYS SHOW LOGIN BUTTONS
+# GET ACCOUNT - AUTO NFToken IN URL
 # ============================================================
 
 async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1254,10 +1253,12 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = []
         
+        # Get NFToken from account
         token = account.get('nftoken')
         
-        # ALWAYS show login buttons - with or without token
+        # ALWAYS show login buttons - with AUTO token in URL
         if token and token != "None" and len(str(token)) > 10:
+            # NFToken exists - AUTO add token to URL
             keyboard.append([
                 InlineKeyboardButton("📱 Phone Login", url=f"https://netflix.com/unsupported?nftoken={token}"),
                 InlineKeyboardButton("🖥️ PC Login", url=f"https://netflix.com/login?nftoken={token}")
@@ -1268,7 +1269,7 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if account.get("nftoken_expiry"):
                 text += f"\n⏳ NFToken expires: `{account['nftoken_expiry']}`"
         else:
-            # No token - still show login buttons (direct links)
+            # No token - show direct Netflix links (user can login manually)
             keyboard.append([
                 InlineKeyboardButton("📱 Phone Login", url="https://netflix.com/unsupported"),
                 InlineKeyboardButton("🖥️ PC Login", url="https://netflix.com/login")
