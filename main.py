@@ -226,7 +226,6 @@ class Database:
             )
         ''')
         
-        # FIXED: stats table with UNIQUE date
         cur.execute('''
             CREATE TABLE IF NOT EXISTS stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -599,17 +598,12 @@ def log_stock(admin_id: int, file_name: str, total: int, valid: int):
     db.execute('INSERT INTO stock_logs (admin_id, file_name, total_found, valid_found) VALUES (?, ?, ?, ?)', (admin_id, file_name, total, valid))
     db.commit()
 
-# ============================================================
-# FIXED: log_daily_stats - No more ON CONFLICT error
-# ============================================================
 def log_daily_stats(hits: int = 0, free: int = 0, bad: int = 0):
     try:
-        # Check if today exists
         cur = db.execute('SELECT id FROM stats WHERE date = CURRENT_DATE')
         row = cur.fetchone()
         
         if row:
-            # Update existing
             db.execute('''
                 UPDATE stats 
                 SET total_hits = total_hits + ?, 
@@ -618,7 +612,6 @@ def log_daily_stats(hits: int = 0, free: int = 0, bad: int = 0):
                 WHERE date = CURRENT_DATE
             ''', (hits, free, bad))
         else:
-            # Insert new
             db.execute('''
                 INSERT INTO stats (date, total_hits, total_free, total_bad)
                 VALUES (CURRENT_DATE, ?, ?, ?)
@@ -626,7 +619,6 @@ def log_daily_stats(hits: int = 0, free: int = 0, bad: int = 0):
         
         db.commit()
     except Exception as e:
-        # Silent fail - stats logging is not critical
         pass
 
 # ============================================================
@@ -1023,14 +1015,13 @@ async def check_force_join(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
     return True
 
 # ============================================================
-# START - UPDATED WITH COOKIE DISPLAY AND DEVELOPER CREDIT
+# START
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
-    # Check if user has pending report
     if has_pending_report(user_id):
         pending = get_pending_report_data(user_id)
         if pending:
@@ -1067,7 +1058,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     stats = get_total_accounts()
     
-    # Get plan counts with proper labels
     plan_emojis = {
         "PREMIUM": "👑",
         "STANDARD": "⭐",
@@ -1129,7 +1119,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_data and (user_data["is_admin"] or user_id in ADMIN_IDS):
         keyboard.append([InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")])
     
-    # Developer credit
     text += "\n\n👨‍💻 **Developer:** @Senzo268"
     
     await update.message.reply_text(
@@ -1137,6 +1126,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN,
     )
+
+# ============================================================
+# CHECK_JOIN_CALLBACK - FIXED FUNCTION DEFINITION
+# ============================================================
+
+async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    
+    if has_pending_report(user_id):
+        pending = get_pending_report_data(user_id)
+        if pending:
+            await query.edit_message_text(
+                f"⚠️ **You have a pending report!**\n\n"
+                f"Please upload a screenshot proof for your **{pending['report_type'].upper()}** report.\n\n"
+                f"📸 Send a screenshot image now.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+    
+    joined = await check_force_join(user_id, context)
+    if joined:
+        await query.edit_message_text("✅ You've joined all channels! Starting bot...")
+        await start(update, context)
+    else:
+        await query.answer("❌ You haven't joined all channels yet!", show_alert=True)
 
 # ============================================================
 # GET ACCOUNT - UPDATED WITH COOKIE DISPLAY AND ALL LOGIN BUTTONS
@@ -1180,7 +1196,6 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     account = accounts[0]
     if assign_account(user_id, account["id"]):
-        # Build the full account details
         text = f"""
 🎉 **ACCOUNT ASSIGNED!**
 
@@ -1211,7 +1226,6 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
         keyboard = []
         
-        # NFToken login buttons - PC, Mobile, TV
         if account.get("nftoken"):
             keyboard.append([
                 InlineKeyboardButton("🖥️ PC Login", url=f"https://netflix.com/login?nftoken={account['nftoken']}"),
@@ -1223,7 +1237,6 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if account.get("nftoken_expiry"):
                 text += f"\n⏳ NFToken expires: `{account['nftoken_expiry']}`"
         else:
-            # If no NFToken, show cookie login method
             keyboard.append([
                 InlineKeyboardButton("🔑 Use Cookie Method", url="https://www.netflix.com/login")
             ])
@@ -1235,7 +1248,6 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")])
         
-        # Developer credit
         text += "\n\n👨‍💻 **Developer:** @Senzo268"
         
         await query.edit_message_text(
@@ -2209,7 +2221,6 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("🚫 You are banned.")
         return
     
-    # FIRST: Check pending report - BLOCK ALL except /start
     if has_pending_report(user_id):
         pending = get_pending_report_data(user_id)
         if pending:
@@ -2227,7 +2238,6 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
             )
             return
     
-    # Contact message
     if context.user_data.get("waiting_for_message"):
         msg_id = create_message(user_id, text)
         context.user_data["waiting_for_message"] = False
@@ -2254,7 +2264,6 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
                 pass
         return
     
-    # Admin add channel
     if context.user_data.get("waiting_for_channel") and user_id in ADMIN_IDS:
         parts = [p.strip() for p in text.split(",")]
         if len(parts) == 3:
@@ -2270,7 +2279,6 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
             )
         return
     
-    # Admin broadcast
     if context.user_data.get("waiting_for_broadcast") and user_id in ADMIN_IDS:
         context.user_data["waiting_for_broadcast"] = False
         users = get_all_users()
@@ -2302,7 +2310,6 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
         )
         return
     
-    # Admin commands
     if user_id in ADMIN_IDS:
         if text.startswith("/reply "):
             parts = text.split(" ", 2)
@@ -2432,12 +2439,10 @@ def main():
         print("❌ BOT_TOKEN not set! Please set BOT_TOKEN in .env file")
         return
     
-    # Start health check server in background
     health_thread = threading.Thread(target=start_health_server, daemon=True)
     health_thread.start()
     time.sleep(1)
     
-    # Start bot
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Commands
@@ -2447,7 +2452,7 @@ def main():
     application.add_handler(CommandHandler("unban", handle_all_text_messages))
     application.add_handler(CommandHandler("reply", handle_all_text_messages))
     
-    # Callbacks
+    # Callbacks - ALL DEFINED FUNCTIONS
     application.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
     application.add_handler(CallbackQueryHandler(get_account, pattern="^get_account$"))
     application.add_handler(CallbackQueryHandler(working_callback, pattern="^working$"))
