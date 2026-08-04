@@ -11,7 +11,6 @@ import sqlite3
 import threading
 import zipfile
 import shutil
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
@@ -72,7 +71,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "")
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
 WEB_PORT = int(os.getenv("PORT", 8080))
-WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 
 admin_ids_str = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(aid.strip()) for aid in admin_ids_str.split(",") if aid.strip().isdigit()]
@@ -108,10 +106,10 @@ class Database:
                     self.conn = libsql.connect(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
                 else:
                     self.conn = libsql.connect(TURSO_DATABASE_URL)
-                logger.info(f"✅ Connected to Turso database: {TURSO_DATABASE_URL}")
+                logger.info(f"✅ Connected to Turso database")
             else:
                 self.conn = sqlite3.connect("bot.db", check_same_thread=False)
-                logger.info(f"✅ Connected to local SQLite database: bot.db")
+                logger.info(f"✅ Connected to local SQLite database")
             self._init_tables()
         except Exception as e:
             logger.warning(f"⚠️ Turso init failed ({e}). Falling back to SQLite.")
@@ -263,7 +261,6 @@ class Database:
     def close(self):
         self.conn.close()
 
-# Initialize database
 db = Database()
 
 # ============================================================
@@ -629,7 +626,7 @@ def log_daily_stats(hits: int = 0, free: int = 0, bad: int = 0):
         pass
 
 # ============================================================
-# NFToken Generator - FIXED (Like the working checker)
+# NFToken Generator
 # ============================================================
 NFTOKEN_API_URL = "https://ios.prod.ftl.netflix.com/iosui/user/15.48"
 NFTOKEN_QUERY_PARAMS = {
@@ -683,7 +680,6 @@ NFTOKEN_HEADERS = {
 }
 
 def generate_nftoken(netflix_id: str, attempts: int = 3) -> Tuple[Optional[str], Optional[str]]:
-    """Generate NFToken with retry logic - FIXED with proper headers and params."""
     if not netflix_id:
         return None, None
     
@@ -975,7 +971,7 @@ def check_account_full(cookies_dict: Dict) -> Dict:
             
             is_subscribed = plan_key != "FREE" or (membership_status and "current_member" in membership_status.lower())
             
-            # Generate NFToken for ALL accounts (FREE + PAID)
+            # Generate NFToken for ALL accounts
             nftoken = None
             nftoken_expiry = None
             nftoken, nftoken_expiry = generate_nftoken(cookies_dict.get("NetflixId"), attempts=3)
@@ -1084,7 +1080,7 @@ async def check_force_join(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
     return True
 
 # ============================================================
-# START
+# START - PREMIUM UI
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1227,7 +1223,7 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("❌ You haven't joined all channels yet!", show_alert=True)
 
 # ============================================================
-# GET ACCOUNT - FIXED WITH PROPER NFToken IN URL
+# GET ACCOUNT - PREMIUM UI WITH ALL DETAILS
 # ============================================================
 
 async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1270,20 +1266,24 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     account = accounts[0]
     if assign_account(user_id, account["id"]):
         
+        # Smart cookie display
         cookie_full = account.get('cookies', 'No cookies available')
         if len(cookie_full) > 3900:
             cookie_display = cookie_full[:3900] + "\n\n... (cookie truncated due to length)"
         else:
             cookie_display = cookie_full
         
+        # Build premium account details with all fields
         text = f"""
 🎉 **ACCOUNT ASSIGNED!**
 
 ━━━━━━━━━━━━━━━━━━━━━
 📧 **Email:** `{account.get('email', 'Unknown')}`
 👤 **Name:** {account.get('account_name', 'Unknown')}
+📱 **Phone:** {account.get('phone', 'Not provided')}
 🌍 **Country:** {account.get('country', 'Unknown')}
 📦 **Plan:** {account.get('plan', 'Unknown')}
+🛡️ **Status:** {account.get('membership_status', 'Unknown')}
 📺 **Streams:** {account.get('streams', '?')}
 🎞️ **Quality:** {account.get('quality', 'Unknown')}
 💰 **Price:** {account.get('price', 'N/A')}
@@ -1310,7 +1310,6 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get token from account
         token = account.get('nftoken')
         
-        # Check if token is VALID (not None, not empty, length > 10)
         if token and token != "None" and len(str(token).strip()) > 10:
             # Valid token - show login buttons WITH token in URL
             keyboard.append([
@@ -1323,7 +1322,7 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if account.get("nftoken_expiry"):
                 text += f"\n⏳ NFToken expires: `{account['nftoken_expiry']}`"
         else:
-            # No valid token - show direct login buttons WITHOUT token
+            # No valid token - show direct login buttons
             keyboard.append([
                 InlineKeyboardButton("📱 Phone Login", url="https://netflix.com/unsupported"),
                 InlineKeyboardButton("🖥️ PC Login", url="https://netflix.com/login")
@@ -1711,7 +1710,7 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
 # ============================================================
-# ADMIN PANEL
+# ADMIN PANEL - WITH SYSTEM STATUS
 # ============================================================
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1726,10 +1725,22 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = get_dashboard_stats()
     pending_reports = get_pending_reports()
     
+    # System status
+    system_status = "🟢 ONLINE"
+    db_status = "✅ Connected" if db.conn else "❌ Disconnected"
+    
     text = f"""
 ⚙️ **ADMIN PANEL**
 
 ━━━━━━━━━━━━━━━━━━━━━
+🖥️ **SYSTEM STATUS**
+┌─────────────────────
+│ Status: **{system_status}**
+│ Database: **{db_status}**
+│ Threads: **{MAX_CHECK_THREADS}**
+│ Retries: **{MAX_RETRIES}**
+└─────────────────────
+
 📊 **STATISTICS**
 ┌─────────────────────
 │ 👥 Total Users: **{stats['total_users']}**
@@ -2477,7 +2488,7 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
     )
 
 # ============================================================
-# ERROR HANDLER
+# ERROR HANDLER - IMPROVED
 # ============================================================
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2490,33 +2501,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except:
         pass
-
-# ============================================================
-# HEALTH CHECK SERVER FOR RAILWAY
-# ============================================================
-
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/' or self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'OK')
-        else:
-            self.send_response(404)
-            self.end_headers()
-    
-    def log_message(self, format, *args):
-        pass
-
-def start_health_server():
-    try:
-        port = int(os.environ.get('PORT', 8080))
-        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-        print(f"✅ Health check server running on port {port}")
-        server.serve_forever()
-    except Exception as e:
-        print(f"⚠️ Health check server: {e}")
 
 # ============================================================
 # MAIN
@@ -2532,16 +2516,11 @@ def main():
     print(f"📦 Max Accounts: {MAX_ACCOUNTS_PER_USER}")
     print(f"🔍 Threads: {MAX_CHECK_THREADS}")
     print(f"🔄 Retries: {MAX_RETRIES}")
-    print(f"🌐 Health Check: http://0.0.0.0:{os.environ.get('PORT', 8080)}/health")
     print("=" * 70)
     
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("❌ BOT_TOKEN not set! Please set BOT_TOKEN in .env file")
         return
-    
-    health_thread = threading.Thread(target=start_health_server, daemon=True)
-    health_thread.start()
-    time.sleep(1)
     
     application = Application.builder().token(BOT_TOKEN).build()
     
