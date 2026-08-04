@@ -622,7 +622,7 @@ def log_daily_stats(hits: int = 0, free: int = 0, bad: int = 0):
         pass
 
 # ============================================================
-# NFToken Generator
+# NFToken Generator - IMPROVED WITH RETRY
 # ============================================================
 NFTOKEN_API_URL = "https://ios.prod.ftl.netflix.com/iosui/user/15.48"
 NFTOKEN_HEADERS = {
@@ -631,21 +631,39 @@ NFTOKEN_HEADERS = {
     "accept-language": "en-US;q=1",
 }
 
-def generate_nftoken(netflix_id: str) -> Tuple[Optional[str], Optional[str]]:
-    try:
-        headers = dict(NFTOKEN_HEADERS)
-        headers["Cookie"] = f"NetflixId={netflix_id}"
-        response = requests.get(NFTOKEN_API_URL, headers=headers, timeout=30, verify=False)
-        if response.status_code != 200:
-            return None, None
-        data = response.json()
-        token_data = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default") or {}
-        token = token_data.get("token")
-        expires = token_data.get("expires")
-        if token:
-            return token, expires
-    except:
-        pass
+def generate_nftoken(netflix_id: str, attempts: int = 3) -> Tuple[Optional[str], Optional[str]]:
+    """Generate NFToken with retry logic for ALL accounts."""
+    if not netflix_id:
+        return None, None
+    
+    for attempt in range(attempts):
+        try:
+            headers = dict(NFTOKEN_HEADERS)
+            headers["Cookie"] = f"NetflixId={netflix_id}"
+            headers["x-netflix.request.attempt"] = str(attempt + 1)
+            
+            response = requests.get(
+                NFTOKEN_API_URL,
+                headers=headers,
+                timeout=30,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                token_data = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default") or {}
+                token = token_data.get("token")
+                expires = token_data.get("expires")
+                if token:
+                    return token, expires
+            
+            # Wait before retry
+            time.sleep(0.5)
+            
+        except Exception as e:
+            logger.warning(f"NFToken attempt {attempt + 1} failed: {e}")
+            time.sleep(0.5)
+    
     return None, None
 
 # ============================================================
@@ -803,8 +821,7 @@ def check_account_full(cookies_dict: Dict) -> Dict:
                 match = re.search(pattern, text, re.IGNORECASE)
                 if match:
                     plan = match.group(1).strip()
-                    break
-            
+                    break            
             plan_key = "FREE"
             plan_label = "Free"
             if plan:
@@ -906,10 +923,13 @@ def check_account_full(cookies_dict: Dict) -> Dict:
             
             is_subscribed = plan_key != "FREE" or (membership_status and "current_member" in membership_status.lower())
             
+            # ============================================================
+            # FIXED: Generate NFToken for ALL accounts (FREE + PAID)
+            # ============================================================
             nftoken = None
             nftoken_expiry = None
-            if is_subscribed:
-                nftoken, nftoken_expiry = generate_nftoken(cookies_dict.get("NetflixId"))
+            # Try to generate NFToken for EVERY account
+            nftoken, nftoken_expiry = generate_nftoken(cookies_dict.get("NetflixId"), attempts=3)
             
             return {
                 "valid": True,
@@ -1158,7 +1178,7 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("❌ You haven't joined all channels yet!", show_alert=True)
 
 # ============================================================
-# GET ACCOUNT - FULLY FIXED WITH ALL BUTTONS FOR EVERY ACCOUNT
+# GET ACCOUNT - FULLY FIXED WITH NFToken FOR ALL ACCOUNTS
 # ============================================================
 
 async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1239,7 +1259,7 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = []
         
-        # === FIXED: ALWAYS show login buttons for EVERY account ===
+        # === FIXED: ALWAYS try to show NFToken buttons for ALL accounts ===
         token = account.get('nftoken')
         
         if token and token != "None" and len(str(token)) > 10:
@@ -1254,7 +1274,7 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if account.get("nftoken_expiry"):
                 text += f"\n⏳ NFToken expires: `{account['nftoken_expiry']}`"
         else:
-            # No NFToken - show cookie method with direct Netflix links
+            # No NFToken - show cookie method + direct Netflix links
             keyboard.append([
                 InlineKeyboardButton("🔑 Use Cookie Method", url="https://www.netflix.com/login")
             ])
