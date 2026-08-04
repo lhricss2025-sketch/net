@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+import traceback
 
 import requests
 import urllib3
@@ -54,7 +55,7 @@ from telegram.ext import (
 )
 
 # ============================================================
-# LOGGING
+# LOGGING - ENHANCED
 # ============================================================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -82,7 +83,7 @@ CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", 20))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
 
 # ============================================================
-# DATABASE CLASS - FIXED TURSO SUPPORT
+# DATABASE CLASS
 # ============================================================
 class Database:
     _instance = None
@@ -2316,6 +2317,73 @@ async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ============================================================
+# ENHANCED ERROR HANDLER
+# ============================================================
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Enhanced error handler with detailed logging and user-friendly messages."""
+    
+    error = context.error
+    error_type = type(error).__name__
+    error_message = str(error)
+    
+    # Log full error with traceback
+    logger.error(f"❌ Error Type: {error_type}")
+    logger.error(f"❌ Error Message: {error_message}")
+    logger.error(f"❌ Full Traceback:", exc_info=True)
+    
+    # Determine user-friendly message based on error type
+    if "Timeout" in error_type or "timed out" in error_message.lower():
+        user_msg = "⏳ **Request timed out.** Please try again in a few seconds."
+    elif "Connection" in error_type or "connect" in error_message.lower():
+        user_msg = "🌐 **Network issue detected.** Please check your connection and try again."
+    elif "Database" in error_type or "sqlite" in error_message.lower():
+        user_msg = "🗄️ **Database error occurred.** Please contact admin."
+        await notify_admin_error(context.bot, f"Database Error: {error_message}")
+    elif "Telegram" in error_type or "telegram" in error_message.lower():
+        user_msg = "📱 **Telegram API error.** Please try again later."
+    elif "KeyError" in error_type or "AttributeError" in error_type:
+        user_msg = "🔧 **Internal error occurred.** Admin has been notified."
+        await notify_admin_error(context.bot, f"Internal Error: {error_type} - {error_message}")
+    elif "Network" in error_type or "Request" in error_type:
+        user_msg = "🌐 **Network error.** Please check your internet connection."
+    else:
+        user_msg = "❌ **An error occurred.** Please try again. If problem persists, contact admin."
+    
+    # Add developer credit
+    user_msg += "\n\n👨‍💻 **Developer:** @Senzo268"
+    
+    # Send message to user
+    try:
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                user_msg,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        elif update and update.callback_query:
+            await update.callback_query.edit_message_text(
+                user_msg,
+                parse_mode=ParseMode.MARKDOWN
+            )
+    except Exception as e:
+        logger.error(f"Failed to send error message to user: {e}")
+
+async def notify_admin_error(bot, error_details: str):
+    """Notify all admins about critical errors."""
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"⚠️ **CRITICAL ERROR REPORT**\n\n"
+                f"📌 {error_details}\n\n"
+                f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify admin {admin_id}: {e}")
+
+# ============================================================
 # TEXT MESSAGE HANDLER
 # ============================================================
 
@@ -2488,21 +2556,6 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
     )
 
 # ============================================================
-# ERROR HANDLER - IMPROVED
-# ============================================================
-
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Error: {context.error}")
-    try:
-        if update and update.effective_message:
-            await update.effective_message.reply_text(
-                "❌ An error occurred. Please try again.\n\n"
-                "👨‍💻 **Developer:** @Senzo268"
-            )
-    except:
-        pass
-
-# ============================================================
 # MAIN
 # ============================================================
 
@@ -2521,6 +2574,10 @@ def main():
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("❌ BOT_TOKEN not set! Please set BOT_TOKEN in .env file")
         return
+    
+    # Enable more detailed logging for debugging
+    logging.getLogger('httpx').setLevel(logging.WARNING)
+    logging.getLogger('httpcore').setLevel(logging.WARNING)
     
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -2563,13 +2620,15 @@ def main():
     application.add_handler(MessageHandler(filters.Document.ALL, handle_file_upload))
     application.add_handler(MessageHandler(filters.TEXT, handle_all_text_messages))
     
+    # Error handler (MUST be last)
     application.add_error_handler(error_handler)
     
     try:
         print("🚀 Starting bot polling...")
         application.run_polling(allowed_updates=Update.ALL_TYPES)
     except Exception as e:
-        print(f"⚠️ Error: {e}")
+        logger.critical(f"❌ Fatal error in main: {e}", exc_info=True)
+        print(f"❌ Fatal error: {e}")
 
 if __name__ == "__main__":
     main()
