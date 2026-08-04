@@ -51,7 +51,7 @@ from telegram import (
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters, ConversationHandler
+    CallbackQueryHandler, ContextTypes, filters
 )
 
 # ============================================================
@@ -71,7 +71,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "")
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
-WEB_PORT = int(os.getenv("WEB_PORT", 5000))
+WEB_PORT = int(os.getenv("PORT", 8080))
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 
 admin_ids_str = os.getenv("ADMIN_IDS", "")
@@ -82,10 +82,6 @@ MAX_ACCOUNTS_PER_USER = int(os.getenv("MAX_ACCOUNTS", 5))
 MAX_CHECK_THREADS = int(os.getenv("MAX_THREADS", 20))
 CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", 20))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
-
-# Conversation states
-(WAITING_REPORT_SCREENSHOT, WAITING_MESSAGE, WAITING_UPLOAD, 
- WAITING_CHANNEL, WAITING_BROADCAST) = range(5)
 
 # ============================================================
 # DATABASE CLASS
@@ -340,10 +336,6 @@ def unban_user(user_id: int):
     db.execute('UPDATE users SET is_banned = 0 WHERE user_id = ?', (user_id,))
     db.commit()
 
-def get_banned_users() -> List[int]:
-    cur = db.execute('SELECT user_id FROM users WHERE is_banned = 1')
-    return [r[0] for r in cur.fetchall()]
-
 def get_available_accounts() -> List[Dict]:
     cur = db.execute('''
         SELECT id, email, country, plan, cookies, nftoken, nftoken_expiry, status,
@@ -453,12 +445,12 @@ def get_assigned_account(user_id: int) -> Optional[Dict]:
     row = cur.fetchone()
     if row:
         return {
-            "id": row[0], "email": row[1], "country": row[2], "plan": row[3],
-            "cookies": row[4], "nftoken": row[5], "nftoken_expiry": row[6],
-            "account_name": row[7], "streams": row[8], "quality": row[9],
-            "price": row[10], "billing_date": row[11], "member_since": row[12],
-            "payment_method": row[13], "card_last4": row[14], "phone": row[15],
-            "extra_member": row[16], "profiles": row[17], "user_guid": row[18],
+            "id": r[0], "email": r[1], "country": r[2], "plan": r[3],
+            "cookies": r[4], "nftoken": r[5], "nftoken_expiry": r[6],
+            "account_name": r[7], "streams": r[8], "quality": r[9],
+            "price": r[10], "billing_date": r[11], "member_since": r[12],
+            "payment_method": r[13], "card_last4": r[14], "phone": r[15],
+            "extra_member": r[16], "profiles": r[17], "user_guid": r[18],
         }
     return None
 
@@ -973,7 +965,7 @@ def extract_files_from_source(source_path: str) -> List[Dict]:
     return files
 
 # ============================================================
-# TELEGRAM BOT - ENHANCED UI
+# TELEGRAM BOT - HANDLERS
 # ============================================================
 
 def clean_channel_id(ch_id: str):
@@ -1011,7 +1003,7 @@ async def check_force_join(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
     return True
 
 # ============================================================
-# START - MAIN MENU
+# START
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1084,14 +1076,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔽 **SELECT AN OPTION BELOW**
 """
     
-    # Check if user has an assigned account
     assigned = get_assigned_account(user_id)
     
     keyboard = [
         [InlineKeyboardButton("🎯 Get Account", callback_data="get_account")],
     ]
     
-    # Only show Working/Not Working buttons if user HAS an assigned account
     if assigned:
         keyboard.append([
             InlineKeyboardButton("✅ Working", callback_data="working"),
@@ -1113,7 +1103,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ============================================================
-# CHECK JOIN CALLBACK
+# CALLBACKS
 # ============================================================
 
 async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1121,7 +1111,6 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     user_id = query.from_user.id
     
-    # Check pending report first
     if has_pending_report(user_id):
         pending = get_pending_report_data(user_id)
         if pending:
@@ -1140,16 +1129,11 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await query.answer("❌ You haven't joined all channels yet!", show_alert=True)
 
-# ============================================================
-# GET ACCOUNT
-# ============================================================
-
 async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     
-    # Check pending report first
     if has_pending_report(user_id):
         pending = get_pending_report_data(user_id)
         if pending:
@@ -1232,16 +1216,11 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.edit_message_text("❌ Failed to assign account. Please try again!")
 
-# ============================================================
-# WORKING / NOT WORKING CALLBACKS
-# ============================================================
-
 async def working_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     
-    # Check pending report first
     if has_pending_report(user_id):
         pending = get_pending_report_data(user_id)
         if pending:
@@ -1265,7 +1244,6 @@ async def notworking_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     user_id = query.from_user.id
     
-    # Check pending report first
     if has_pending_report(user_id):
         pending = get_pending_report_data(user_id)
         if pending:
@@ -1284,10 +1262,6 @@ async def notworking_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     query.data = f"report_notworking_{assigned['id']}"
     await report_account(update, context)
 
-# ============================================================
-# REPORT ACCOUNT - SET PENDING REPORT
-# ============================================================
-
 async def report_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1303,7 +1277,6 @@ async def report_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🚫 You are banned.")
         return
     
-    # Check if user already has pending report
     if has_pending_report(user_id):
         pending = get_pending_report_data(user_id)
         if pending:
@@ -1315,7 +1288,6 @@ async def report_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
     
-    # Set pending report in database
     set_pending_report(user_id, account_id, report_type)
     
     emoji = "✅" if report_type == "working" else "❌"
@@ -1327,10 +1299,6 @@ async def report_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
 
-# ============================================================
-# HANDLE SCREENSHOT - COMPLETE REPORT
-# ============================================================
-
 async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = get_user(user_id)
@@ -1339,7 +1307,6 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 You are banned.")
         return
     
-    # Check if user has pending report
     if not has_pending_report(user_id):
         await update.message.reply_text(
             "❌ You don't have any pending report.\n\n"
@@ -1363,7 +1330,6 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     file_id = photo[-1].file_id
     
-    # Create report and clear pending status
     report_id = create_report(
         user_id,
         pending["account_id"],
@@ -1371,8 +1337,6 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id,
     )
     clear_pending_report(user_id)
-    
-    # Release the account after report
     release_account(pending["account_id"])
     
     await update.message.reply_text(
@@ -1385,10 +1349,6 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     await notify_admins_report(context.bot, report_id, user_id, pending["account_id"], pending["report_type"])
-
-# ============================================================
-# NOTIFY ADMINS
-# ============================================================
 
 async def notify_admins_report(bot, report_id: int, user_id: int, account_id: int, report_type: str):
     user = get_user(user_id) or {}
@@ -1443,10 +1403,6 @@ Plan: {account.get('plan', 'Unknown')}
             except:
                 pass
 
-# ============================================================
-# REVIEW REPORT CALLBACK
-# ============================================================
-
 async def review_report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1484,16 +1440,11 @@ async def review_report_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     await query.edit_message_text(f"✅ Report #{report_id} has been **{status.upper()}**!")
 
-# ============================================================
-# CONTACT ADMIN
-# ============================================================
-
 async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     
-    # Check pending report first
     if has_pending_report(user_id):
         pending = get_pending_report_data(user_id)
         if pending:
@@ -1518,16 +1469,11 @@ async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data["waiting_for_message"] = True
 
-# ============================================================
-# MY STATUS
-# ============================================================
-
 async def my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     
-    # Check pending report first
     if has_pending_report(user_id):
         pending = get_pending_report_data(user_id)
         if pending:
@@ -1594,16 +1540,11 @@ async def my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_menu")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
-# ============================================================
-# BACK TO MENU
-# ============================================================
-
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     
-    # Check pending report first
     if has_pending_report(user_id):
         pending = get_pending_report_data(user_id)
         if pending:
@@ -1680,10 +1621,6 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
 
-# ============================================================
-# ADMIN UPLOAD
-# ============================================================
-
 async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1701,10 +1638,6 @@ async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
     context.user_data["waiting_for_upload"] = True
-
-# ============================================================
-# HANDLE FILE UPLOAD
-# ============================================================
 
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1876,10 +1809,6 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"❌ Error: {str(e)}")
         context.user_data["waiting_for_upload"] = False
 
-# ============================================================
-# ADMIN REPORTS
-# ============================================================
-
 async def admin_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1915,10 +1844,6 @@ async def admin_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN,
     )
-
-# ============================================================
-# ADMIN MESSAGES
-# ============================================================
 
 async def admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1967,10 +1892,6 @@ async def reply_message_callback(update: Update, context: ContextTypes.DEFAULT_T
         f"Send: `/reply {msg_id} <your message>`",
         parse_mode=ParseMode.MARKDOWN,
     )
-
-# ============================================================
-# ADMIN USERS
-# ============================================================
 
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2031,10 +1952,6 @@ async def users_nav_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["users_page"] = current + 1
     await admin_users(update, context)
 
-# ============================================================
-# ADMIN BROADCAST
-# ============================================================
-
 async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2051,10 +1968,6 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
     context.user_data["waiting_for_broadcast"] = True
-
-# ============================================================
-# ADMIN CHANNELS
-# ============================================================
 
 async def admin_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2141,10 +2054,6 @@ async def remove_channel_callback(update: Update, context: ContextTypes.DEFAULT_
     remove_channel(channel_id)
     await query.edit_message_text(f"✅ Channel {channel_id} has been removed!")
 
-# ============================================================
-# ADMIN STOCK LOGS
-# ============================================================
-
 async def admin_stock_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2170,10 +2079,6 @@ async def admin_stock_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN,
     )
-
-# ============================================================
-# ADMIN DASHBOARD
-# ============================================================
 
 async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2250,16 +2155,14 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("🚫 You are banned.")
         return
     
-    # FIRST: Check if user has pending report - BLOCK ALL commands except /start
+    # FIRST: Check pending report - BLOCK ALL except /start
     if has_pending_report(user_id):
         pending = get_pending_report_data(user_id)
         if pending:
-            # Allow /start command to show pending message
             if text.startswith("/start"):
                 await start(update, context)
                 return
             
-            # Block everything else
             await update.message.reply_text(
                 f"⚠️ **You have a pending report!**\n\n"
                 f"Please upload a screenshot proof for your **{pending['report_type'].upper()}** report.\n\n"
@@ -2380,10 +2283,8 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
                 await update.message.reply_text(f"✅ User `{parts[1]}` has been unbanned!", parse_mode=ParseMode.MARKDOWN)
             return
     
-    # Check if user has assigned account before showing working/not working buttons
     assigned = get_assigned_account(user_id)
     
-    # Fallback - show menu with appropriate buttons
     keyboard = [
         [InlineKeyboardButton("🎯 Get Account", callback_data="get_account")],
     ]
@@ -2420,306 +2321,31 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 # ============================================================
-# WEB DASHBOARD
+# HEALTH CHECK SERVER FOR RAILWAY
 # ============================================================
 
-def start_web_dashboard():
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/' or self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        pass
+
+def start_health_server():
     try:
-        from flask import Flask, render_template_string, jsonify
-    except ImportError:
-        logger.warning("Flask not installed. Web dashboard disabled.")
-        return
-    
-    app = Flask(__name__)
-    
-    DASHBOARD_HTML = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Netflix Bot Dashboard</title>
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body {
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                background: #0a0e1a;
-                color: #e0e0e0;
-                padding: 20px;
-            }
-            .container { max-width: 1400px; margin: 0 auto; }
-            
-            .header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                padding: 20px 0;
-                border-bottom: 1px solid #1a2040;
-                margin-bottom: 30px;
-            }
-            .header h1 {
-                font-size: 28px;
-                background: linear-gradient(135deg, #e50914, #ff6b6b);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-                background-clip: text;
-            }
-            .header .time { color: #888; font-size: 14px; }
-            
-            .stats-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-                gap: 15px;
-                margin-bottom: 30px;
-            }
-            .stat-card {
-                background: #141b2b;
-                border-radius: 12px;
-                padding: 18px;
-                border: 1px solid #1a2040;
-                transition: all 0.3s;
-            }
-            .stat-card:hover {
-                border-color: #e50914;
-                transform: translateY(-2px);
-            }
-            .stat-card .label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 1px; }
-            .stat-card .value { font-size: 28px; font-weight: bold; margin-top: 6px; }
-            .stat-card .value.green { color: #4caf50; }
-            .stat-card .value.blue { color: #2196f3; }
-            .stat-card .value.red { color: #e50914; }
-            .stat-card .value.orange { color: #ff9800; }
-            .stat-card .value.purple { color: #9c27b0; }
-            
-            .charts-row {
-                display: grid;
-                grid-template-columns: 2fr 1fr;
-                gap: 20px;
-                margin-bottom: 30px;
-            }
-            .chart-box {
-                background: #141b2b;
-                border-radius: 12px;
-                padding: 20px;
-                border: 1px solid #1a2040;
-            }
-            .chart-box h3 { margin-bottom: 15px; color: #aaa; font-weight: normal; }
-            
-            .plan-bars {
-                display: flex;
-                flex-direction: column;
-                gap: 6px;
-            }
-            .plan-bar {
-                display: flex;
-                align-items: center;
-                gap: 10px;
-            }
-            .plan-bar .plan-name { width: 120px; font-size: 13px; }
-            .plan-bar .bar-bg {
-                flex: 1;
-                height: 22px;
-                background: #1a2040;
-                border-radius: 6px;
-                overflow: hidden;
-                position: relative;
-            }
-            .plan-bar .bar-fill {
-                height: 100%;
-                border-radius: 6px;
-                transition: width 0.5s ease;
-                display: flex;
-                align-items: center;
-                justify-content: flex-end;
-                padding-right: 6px;
-                font-size: 11px;
-                font-weight: bold;
-                min-width: 25px;
-            }
-            .plan-bar .bar-fill.premium { background: linear-gradient(90deg, #e50914, #ff6b6b); }
-            .plan-bar .bar-fill.standard { background: linear-gradient(90deg, #2196f3, #64b5f6); }
-            .plan-bar .bar-fill.basic { background: linear-gradient(90deg, #4caf50, #81c784); }
-            .plan-bar .bar-fill.mobile { background: linear-gradient(90deg, #ff9800, #ffc107); }
-            .plan-bar .bar-fill.free { background: linear-gradient(90deg, #888, #aaa); }
-            .plan-bar .bar-fill.unknown { background: linear-gradient(90deg, #9c27b0, #ce93d8); }
-            .plan-bar .count { font-size: 13px; font-weight: bold; min-width: 35px; text-align: right; }
-            
-            .recent-table {
-                width: 100%;
-                border-collapse: collapse;
-                font-size: 13px;
-            }
-            .recent-table th {
-                text-align: left;
-                padding: 8px 10px;
-                border-bottom: 1px solid #1a2040;
-                color: #888;
-                font-weight: normal;
-            }
-            .recent-table td {
-                padding: 8px 10px;
-                border-bottom: 1px solid #0a0e1a;
-            }
-            .recent-table tr:hover td { background: #1a2040; }
-            .badge {
-                padding: 2px 8px;
-                border-radius: 20px;
-                font-size: 11px;
-                font-weight: bold;
-            }
-            .badge.green { background: #1b5e20; color: #81c784; }
-            .badge.red { background: #b71c1c; color: #ef9a9a; }
-            
-            .footer {
-                text-align: center;
-                padding: 20px 0;
-                color: #555;
-                font-size: 12px;
-                border-top: 1px solid #1a2040;
-                margin-top: 30px;
-            }
-            
-            @media (max-width: 768px) {
-                .charts-row { grid-template-columns: 1fr; }
-                .stats-grid { grid-template-columns: repeat(2, 1fr); }
-                .plan-bar .plan-name { width: 70px; font-size: 11px; }
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>🎬 Netflix Bot Dashboard</h1>
-                <span class="time" id="currentTime"></span>
-            </div>
-            
-            <div class="stats-grid" id="statsGrid"></div>
-            
-            <div class="charts-row">
-                <div class="chart-box">
-                    <h3>📊 Plan Distribution</h3>
-                    <div class="plan-bars" id="planBars"></div>
-                </div>
-                <div class="chart-box">
-                    <h3>📈 Recent Activity</h3>
-                    <div id="recentActivity">
-                        <table class="recent-table">
-                            <thead><tr><th>Date</th><th>Hits</th><th>Bad</th></tr></thead>
-                            <tbody id="recentBody"></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="footer">
-                Netflix Bot v2.0 | ⚡ Real-time Dashboard | Auto-refresh: 10s
-            </div>
-        </div>
-        
-        <script>
-            async function fetchStats() {
-                try {
-                    const response = await fetch('/api/stats');
-                    const data = await response.json();
-                    updateDashboard(data);
-                } catch (e) {
-                    console.error('Error fetching stats:', e);
-                }
-            }
-            
-            function updateDashboard(data) {
-                const grid = document.getElementById('statsGrid');
-                const stats = [
-                    { label: 'Total Users', value: data.total_users, color: 'blue' },
-                    { label: 'Active Users', value: data.active_users, color: 'green' },
-                    { label: 'Available', value: data.available, color: 'green' },
-                    { label: 'Working', value: data.total_working, color: 'blue' },
-                    { label: 'Assigned', value: data.assigned, color: 'orange' },
-                    { label: 'Pending Reports', value: data.pending_reports, color: 'red' },
-                    { label: 'Accepted', value: data.accepted_reports, color: 'green' },
-                    { label: 'Rejected', value: data.rejected_reports, color: 'red' },
-                ];
-                
-                grid.innerHTML = stats.map(s => `
-                    <div class="stat-card">
-                        <div class="label">${s.label}</div>
-                        <div class="value ${s.color}">${s.value}</div>
-                    </div>
-                `).join('');
-                
-                const planBars = document.getElementById('planBars');
-                const plans = data.plan_counts || {};
-                const colors = { 'PREMIUM': 'premium', 'STANDARD': 'standard', 'BASIC': 'basic', 'MOBILE': 'mobile', 'FREE': 'free' };
-                const total = Object.values(plans).reduce((a, b) => a + b, 0) || 1;
-                const planOrder = ['PREMIUM', 'STANDARD', 'BASIC', 'MOBILE', 'FREE'];
-                const planLabels = { 'PREMIUM': '👑 Premium', 'STANDARD': '⭐ Standard', 'BASIC': '🎯 Basic', 'MOBILE': '📱 Mobile', 'FREE': '🆓 Free' };
-                
-                let barsHtml = '';
-                for (const key of planOrder) {
-                    const count = plans[key] || 0;
-                    const percent = (count / total * 100);
-                    const colorClass = colors[key] || 'unknown';
-                    const label = planLabels[key] || key;
-                    barsHtml += `
-                        <div class="plan-bar">
-                            <span class="plan-name">${label}</span>
-                            <div class="bar-bg">
-                                <div class="bar-fill ${colorClass}" style="width: ${percent}%">${count > 0 ? count : ''}</div>
-                            </div>
-                            <span class="count">${count}</span>
-                        </div>
-                    `;
-                }
-                planBars.innerHTML = barsHtml;
-                
-                const recentBody = document.getElementById('recentBody');
-                const recent = data.recent_stats || [];
-                recentBody.innerHTML = recent.slice(0, 7).map(day => `
-                    <tr>
-                        <td>${day.date}</td>
-                        <td><span class="badge green">+${day.hits || 0}</span></td>
-                        <td><span class="badge red">${day.bad || 0}</span></td>
-                    </tr>
-                `).join('');
-            }
-            
-            function updateTime() {
-                document.getElementById('currentTime').textContent = new Date().toLocaleString();
-            }
-            
-            fetchStats();
-            updateTime();
-            setInterval(fetchStats, 10000);
-            setInterval(updateTime, 1000);
-        </script>
-    </body>
-    </html>
-    """
-    
-    @app.route('/')
-    def dashboard():
-        return render_template_string(DASHBOARD_HTML)
-    
-    @app.route('/api/stats')
-    def api_stats():
-        stats = get_dashboard_stats()
-        return jsonify(stats)
-    
-    @app.route('/api/users')
-    def api_users():
-        users = get_all_users()
-        return jsonify(users)
-    
-    @app.route('/api/accounts')
-    def api_accounts():
-        accounts = get_available_accounts()
-        return jsonify(accounts)
-    
-    try:
-        app.run(host=WEB_HOST, port=WEB_PORT, debug=False, threaded=True)
-        logger.info(f"🌐 Web dashboard running on http://{WEB_HOST}:{WEB_PORT}")
+        port = int(os.environ.get('PORT', 8080))
+        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+        print(f"✅ Health check server running on port {port}")
+        server.serve_forever()
     except Exception as e:
-        logger.error(f"❌ Failed to start web dashboard: {e}")
+        print(f"⚠️ Health check server: {e}")
 
 # ============================================================
 # MAIN
@@ -2735,16 +2361,16 @@ def main():
     print(f"📦 Max Accounts: {MAX_ACCOUNTS_PER_USER}")
     print(f"🔍 Threads: {MAX_CHECK_THREADS}")
     print(f"🔄 Retries: {MAX_RETRIES}")
-    print(f"🌐 Web Dashboard: http://{WEB_HOST}:{WEB_PORT}")
+    print(f"🌐 Health Check: http://0.0.0.0:{os.environ.get('PORT', 8080)}/health")
     print("=" * 70)
     
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ BOT_TOKEN not set!")
+        print("❌ BOT_TOKEN not set! Please set BOT_TOKEN in .env file")
         return
     
-    # Start web dashboard
-    web_thread = threading.Thread(target=start_web_dashboard, daemon=True)
-    web_thread.start()
+    # Start health check server in background
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
     time.sleep(1)
     
     # Start bot
@@ -2796,41 +2422,6 @@ def main():
         application.run_polling(allowed_updates=Update.ALL_TYPES)
     except Exception as e:
         print(f"⚠️ Error: {e}")
- # ============================================================
-# RAILWAY HEALTH CHECK SERVER (FIXED)
-# ============================================================
-
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import os
-
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/health' or self.path == '/':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'OK')
-        else:
-            self.send_response(404)
-            self.end_headers()
-    
-    def log_message(self, format, *args):
-        pass  # Suppress logs
-
-def start_health_server():
-    """Start health check server for Railway."""
-    try:
-        port = int(os.environ.get('PORT', 8080))
-        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-        print(f"✅ Health check server running on port {port}")
-        server.serve_forever()
-    except Exception as e:
-        print(f"⚠️ Health check server: {e}")
-
-# Start health server in background
-health_thread = threading.Thread(target=start_health_server, daemon=True)
-health_thread.start()       
 
 if __name__ == "__main__":
     main()
