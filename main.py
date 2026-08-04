@@ -1028,7 +1028,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"⚠️ **You have a pending report!**\n\n"
                 f"Please upload a screenshot proof for your **{pending['report_type'].upper()}** report.\n\n"
-                f"📸 Send a screenshot image now.",
+                f"📸 Send a screenshot image now.\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -1128,7 +1129,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ============================================================
-# CHECK_JOIN_CALLBACK - FIXED FUNCTION DEFINITION
+# CHECK_JOIN_CALLBACK
 # ============================================================
 
 async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1142,7 +1143,8 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.edit_message_text(
                 f"⚠️ **You have a pending report!**\n\n"
                 f"Please upload a screenshot proof for your **{pending['report_type'].upper()}** report.\n\n"
-                f"📸 Send a screenshot image now.",
+                f"📸 Send a screenshot image now.\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -1155,7 +1157,7 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("❌ You haven't joined all channels yet!", show_alert=True)
 
 # ============================================================
-# GET ACCOUNT - UPDATED WITH COOKIE DISPLAY AND ALL LOGIN BUTTONS
+# GET ACCOUNT - SMART COOKIE + ALL 3 BUTTONS
 # ============================================================
 
 async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1169,7 +1171,8 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"⚠️ **You have a pending report!**\n\n"
                 f"Please upload a screenshot proof for your **{pending['report_type'].upper()}** report.\n\n"
-                f"📸 Send a screenshot image now.",
+                f"📸 Send a screenshot image now.\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -1196,6 +1199,14 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     account = accounts[0]
     if assign_account(user_id, account["id"]):
+        
+        # SMART COOKIE - only truncate if too long (3900+ chars)
+        cookie_full = account.get('cookies', 'No cookies available')
+        if len(cookie_full) > 3900:
+            cookie_display = cookie_full[:3900] + "\n\n... (cookie truncated due to length)"
+        else:
+            cookie_display = cookie_full
+        
         text = f"""
 🎉 **ACCOUNT ASSIGNED!**
 
@@ -1214,7 +1225,7 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ━━━━━━━━━━━━━━━━━━━━━
 
 🍪 **Cookie:**
-`{account.get('cookies', 'No cookies available')[:200]}...`
+`{cookie_display}`
 
 ━━━━━━━━━━━━━━━━━━━━━
 
@@ -1224,15 +1235,19 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
 3️⃣ **IMPORTANT:** After testing, click Working or Not Working
    and upload a screenshot as proof
 """
+        
         keyboard = []
         
+        # Phone + PC buttons (same as before)
         if account.get("nftoken"):
+            token = account['nftoken']
             keyboard.append([
-                InlineKeyboardButton("🖥️ PC Login", url=f"https://netflix.com/login?nftoken={account['nftoken']}"),
-                InlineKeyboardButton("📱 Mobile Login", url=f"https://netflix.com/unsupported?nftoken={account['nftoken']}")
+                InlineKeyboardButton("📱 Phone Login", url=f"https://netflix.com/unsupported?nftoken={token}"),
+                InlineKeyboardButton("🖥️ PC Login", url=f"https://netflix.com/login?nftoken={token}")
             ])
+            # TV Login - separate button below
             keyboard.append([
-                InlineKeyboardButton("📺 TV Login", url=f"https://netflix.com/tv8?nftoken={account['nftoken']}")
+                InlineKeyboardButton("📺 TV Login", url=f"https://netflix.com/tv8?nftoken={token}")
             ])
             if account.get("nftoken_expiry"):
                 text += f"\n⏳ NFToken expires: `{account['nftoken_expiry']}`"
@@ -1273,7 +1288,8 @@ async def working_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"⚠️ **You have a pending report!**\n\n"
                 f"Please upload a screenshot proof for your **{pending['report_type'].upper()}** report first.\n\n"
-                f"📸 Send a screenshot image now.",
+                f"📸 Send a screenshot image now.\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -1296,7 +1312,8 @@ async def notworking_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.edit_message_text(
                 f"⚠️ **You have a pending report!**\n\n"
                 f"Please upload a screenshot proof for your **{pending['report_type'].upper()}** report first.\n\n"
-                f"📸 Send a screenshot image now.",
+                f"📸 Send a screenshot image now.\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -1329,7 +1346,8 @@ async def report_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"⚠️ **You already have a pending report!**\n\n"
                 f"Please upload a screenshot proof for your **{pending['report_type'].upper()}** report first.\n\n"
-                f"📸 Send a screenshot image now.",
+                f"📸 Send a screenshot image now.\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -1356,21 +1374,23 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not has_pending_report(user_id):
         await update.message.reply_text(
             "❌ You don't have any pending report.\n\n"
-            "Use the menu buttons to report an account first.",
+            "Use the menu buttons to report an account first.\n\n"
+            "👨‍💻 **Developer:** @Senzo268",
         )
         return
     
     pending = get_pending_report_data(user_id)
     if not pending:
         clear_pending_report(user_id)
-        await update.message.reply_text("❌ Invalid pending report. Please try again.")
+        await update.message.reply_text("❌ Invalid pending report. Please try again.\n\n👨‍💻 **Developer:** @Senzo268")
         return
     
     photo = update.message.photo
     if not photo:
         await update.message.reply_text(
             "❌ Please upload an **image/screenshot**.\n\n"
-            "Send a screenshot image to complete your report.",
+            "Send a screenshot image to complete your report.\n\n"
+            "👨‍💻 **Developer:** @Senzo268",
         )
         return
     
@@ -1501,7 +1521,8 @@ async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"⚠️ **You have a pending report!**\n\n"
                 f"Please upload a screenshot proof for your **{pending['report_type'].upper()}** report first.\n\n"
-                f"📸 Send a screenshot image now.",
+                f"📸 Send a screenshot image now.\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -1531,7 +1552,8 @@ async def my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"⚠️ **You have a pending report!**\n\n"
                 f"Please upload a screenshot proof for your **{pending['report_type'].upper()}** report first.\n\n"
-                f"📸 Send a screenshot image now.",
+                f"📸 Send a screenshot image now.\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -1603,7 +1625,8 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"⚠️ **You have a pending report!**\n\n"
                 f"Please upload a screenshot proof for your **{pending['report_type'].upper()}** report first.\n\n"
-                f"📸 Send a screenshot image now.",
+                f"📸 Send a screenshot image now.\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -1863,7 +1886,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["waiting_for_upload"] = False
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await update.message.reply_text(f"❌ Error: {str(e)}\n\n👨‍💻 **Developer:** @Senzo268")
         context.user_data["waiting_for_upload"] = False
 
 async def admin_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1877,7 +1900,7 @@ async def admin_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     reports = get_pending_reports()
     if not reports:
-        await query.edit_message_text("📋 **No pending reports.**", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text("📋 **No pending reports.**\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
         return
     
     text = "📋 **PENDING REPORTS**\n\n"
@@ -1914,7 +1937,7 @@ async def admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     messages = get_pending_messages()
     if not messages:
-        await query.edit_message_text("📩 **No pending messages.**", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text("📩 **No pending messages.**\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
         return
     
     text = "📩 **PENDING MESSAGES**\n\n"
@@ -2092,7 +2115,7 @@ async def admin_remove_channel(update: Update, context: ContextTypes.DEFAULT_TYP
     
     channels = get_channels()
     if not channels:
-        await query.edit_message_text("❌ No channels to remove.")
+        await query.edit_message_text("❌ No channels to remove.\n\n👨‍💻 **Developer:** @Senzo268")
         return
     
     keyboard = []
@@ -2129,7 +2152,7 @@ async def admin_stock_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logs = get_stock_logs()
     if not logs:
-        await query.edit_message_text("📊 No stock uploads yet.")
+        await query.edit_message_text("📊 No stock uploads yet.\n\n👨‍💻 **Developer:** @Senzo268")
         return
     
     text = "📊 **STOCK UPLOAD LOGS**\n\n"
@@ -2452,7 +2475,7 @@ def main():
     application.add_handler(CommandHandler("unban", handle_all_text_messages))
     application.add_handler(CommandHandler("reply", handle_all_text_messages))
     
-    # Callbacks - ALL DEFINED FUNCTIONS
+    # Callbacks
     application.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
     application.add_handler(CallbackQueryHandler(get_account, pattern="^get_account$"))
     application.add_handler(CallbackQueryHandler(working_callback, pattern="^working$"))
