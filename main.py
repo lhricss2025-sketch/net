@@ -226,10 +226,11 @@ class Database:
             )
         ''')
         
+        # FIXED: stats table with UNIQUE date
         cur.execute('''
             CREATE TABLE IF NOT EXISTS stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date DATE DEFAULT CURRENT_DATE,
+                date DATE UNIQUE,
                 total_hits INT DEFAULT 0,
                 total_free INT DEFAULT 0,
                 total_bad INT DEFAULT 0
@@ -598,16 +599,35 @@ def log_stock(admin_id: int, file_name: str, total: int, valid: int):
     db.execute('INSERT INTO stock_logs (admin_id, file_name, total_found, valid_found) VALUES (?, ?, ?, ?)', (admin_id, file_name, total, valid))
     db.commit()
 
+# ============================================================
+# FIXED: log_daily_stats - No more ON CONFLICT error
+# ============================================================
 def log_daily_stats(hits: int = 0, free: int = 0, bad: int = 0):
-    db.execute('''
-        INSERT INTO stats (date, total_hits, total_free, total_bad)
-        VALUES (CURRENT_DATE, ?, ?, ?)
-        ON CONFLICT(date) DO UPDATE SET
-            total_hits = total_hits + excluded.total_hits,
-            total_free = total_free + excluded.total_free,
-            total_bad = total_bad + excluded.total_bad
-    ''', (hits, free, bad))
-    db.commit()
+    try:
+        # Check if today exists
+        cur = db.execute('SELECT id FROM stats WHERE date = CURRENT_DATE')
+        row = cur.fetchone()
+        
+        if row:
+            # Update existing
+            db.execute('''
+                UPDATE stats 
+                SET total_hits = total_hits + ?, 
+                    total_free = total_free + ?, 
+                    total_bad = total_bad + ?
+                WHERE date = CURRENT_DATE
+            ''', (hits, free, bad))
+        else:
+            # Insert new
+            db.execute('''
+                INSERT INTO stats (date, total_hits, total_free, total_bad)
+                VALUES (CURRENT_DATE, ?, ?, ?)
+            ''', (hits, free, bad))
+        
+        db.commit()
+    except Exception as e:
+        # Silent fail - stats logging is not critical
+        pass
 
 # ============================================================
 # NFToken Generator
@@ -1003,7 +1023,7 @@ async def check_force_join(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
     return True
 
 # ============================================================
-# START
+# START - UPDATED WITH COOKIE DISPLAY AND DEVELOPER CREDIT
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1047,8 +1067,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     stats = get_total_accounts()
     
+    # Get plan counts with proper labels
+    plan_emojis = {
+        "PREMIUM": "👑",
+        "STANDARD": "⭐",
+        "BASIC": "🎯",
+        "MOBILE": "📱",
+        "FREE": "🆓"
+    }
+    
+    plan_display = ""
+    for plan, count in stats['plans'].items():
+        emoji = plan_emojis.get(plan, "📦")
+        plan_display += f"│ {emoji} {plan}: **{count}**\n"
+    
+    if not plan_display:
+        plan_display = "│ No accounts available\n"
+    
     text = f"""
-🌟 **WELCOME TO NETFLIX BOT** 🌟
+🌟 **WELCOME TO SENZO NETFLIX BOT** 🌟
 
 ━━━━━━━━━━━━━━━━━━━━━
 👋 Hello **{user.first_name}**!
@@ -1056,12 +1093,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📊 **ACCOUNT STATUS**
 ┌─────────────────────
-│ 📦 Available: **{stats['total']}**
-│ 👑 Premium: **{stats['plans'].get('PREMIUM', 0)}**
-│ ⭐ Standard: **{stats['plans'].get('STANDARD', 0)}**
-│ 🎯 Basic: **{stats['plans'].get('BASIC', 0)}**
-│ 📱 Mobile: **{stats['plans'].get('MOBILE', 0)}**
-└─────────────────────
+│ 📦 Total Available: **{stats['total']}**
+{plan_display}└─────────────────────
 
 ⚙️ **YOUR STATS**
 ┌─────────────────────
@@ -1096,6 +1129,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_data and (user_data["is_admin"] or user_id in ADMIN_IDS):
         keyboard.append([InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")])
     
+    # Developer credit
+    text += "\n\n👨‍💻 **Developer:** @Senzo268"
+    
     await update.message.reply_text(
         text,
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1103,31 +1139,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ============================================================
-# CALLBACKS
+# GET ACCOUNT - UPDATED WITH COOKIE DISPLAY AND ALL LOGIN BUTTONS
 # ============================================================
-
-async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    
-    if has_pending_report(user_id):
-        pending = get_pending_report_data(user_id)
-        if pending:
-            await query.edit_message_text(
-                f"⚠️ **You have a pending report!**\n\n"
-                f"Please upload a screenshot proof for your **{pending['report_type'].upper()}** report.\n\n"
-                f"📸 Send a screenshot image now.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-    
-    joined = await check_force_join(user_id, context)
-    if joined:
-        await query.edit_message_text("✅ You've joined all channels! Starting bot...")
-        await start(update, context)
-    else:
-        await query.answer("❌ You haven't joined all channels yet!", show_alert=True)
 
 async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1167,6 +1180,7 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     account = accounts[0]
     if assign_account(user_id, account["id"]):
+        # Build the full account details
         text = f"""
 🎉 **ACCOUNT ASSIGNED!**
 
@@ -1184,6 +1198,11 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🆔 **GUID:** `{account.get('user_guid', 'Unknown')}`
 ━━━━━━━━━━━━━━━━━━━━━
 
+🍪 **Cookie:**
+`{account.get('cookies', 'No cookies available')[:200]}...`
+
+━━━━━━━━━━━━━━━━━━━━━
+
 📝 **INSTRUCTIONS:**
 1️⃣ Click a login link below
 2️⃣ Test the account
@@ -1192,14 +1211,22 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
         keyboard = []
         
+        # NFToken login buttons - PC, Mobile, TV
         if account.get("nftoken"):
             keyboard.append([
-                InlineKeyboardButton("📱 Phone Login", url=f"https://netflix.com/unsupported?nftoken={account['nftoken']}"),
-                InlineKeyboardButton("🖥️ PC Login", url=f"https://netflix.com/login?nftoken={account['nftoken']}")
+                InlineKeyboardButton("🖥️ PC Login", url=f"https://netflix.com/login?nftoken={account['nftoken']}"),
+                InlineKeyboardButton("📱 Mobile Login", url=f"https://netflix.com/unsupported?nftoken={account['nftoken']}")
             ])
-            keyboard.append([InlineKeyboardButton("📺 TV Login", url=f"https://netflix.com/tv8?nftoken={account['nftoken']}")])
+            keyboard.append([
+                InlineKeyboardButton("📺 TV Login", url=f"https://netflix.com/tv8?nftoken={account['nftoken']}")
+            ])
             if account.get("nftoken_expiry"):
                 text += f"\n⏳ NFToken expires: `{account['nftoken_expiry']}`"
+        else:
+            # If no NFToken, show cookie login method
+            keyboard.append([
+                InlineKeyboardButton("🔑 Use Cookie Method", url="https://www.netflix.com/login")
+            ])
         
         text += "\n\n✅ **After testing, report below:**"
         keyboard.append([
@@ -1208,6 +1235,9 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")])
         
+        # Developer credit
+        text += "\n\n👨‍💻 **Developer:** @Senzo268"
+        
         await query.edit_message_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1215,6 +1245,10 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await query.edit_message_text("❌ Failed to assign account. Please try again!")
+
+# ============================================================
+# WORKING / NOT WORKING CALLBACKS
+# ============================================================
 
 async def working_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1295,7 +1329,7 @@ async def report_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{emoji} **Report: {report_type.upper()}**\n\n"
         f"📸 **Please upload a screenshot proof** for this report.\n\n"
         f"⚠️ **You must upload a screenshot before you can do anything else!**\n\n"
-        f"Send a screenshot image now.",
+        f"Send a screenshot image now.\n\n👨‍💻 **Developer:** @Senzo268",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -1344,7 +1378,8 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Report ID: #{report_id}\n"
         f"Type: {pending['report_type'].upper()}\n\n"
         f"Admin will review your report shortly.\n"
-        f"You can now use the bot again.",
+        f"You can now use the bot again.\n\n"
+        f"👨‍💻 **Developer:** @Senzo268",
         parse_mode=ParseMode.MARKDOWN,
     )
     
@@ -1362,6 +1397,8 @@ User: @{user.get('username', 'NoUsername')}
 Type: **{report_type.upper()}**
 Account: `{account.get('email', 'Unknown')}`
 Plan: {account.get('plan', 'Unknown')}
+
+👨‍💻 **Developer:** @Senzo268
 """
     
     cur = db.execute('SELECT screenshot_file_id FROM reports WHERE id = ?', (report_id,))
@@ -1434,6 +1471,7 @@ async def review_report_callback(update: Update, context: ContextTypes.DEFAULT_T
                     msg += "\n\n🔄 Account has been removed from stock."
             else:
                 msg = f"❌ Your report (#{report_id}) was **rejected**.\n\n⚠️ Please only submit genuine reports."
+            msg += "\n\n👨‍💻 **Developer:** @Senzo268"
             await context.bot.send_message(user_id_reporter, msg, parse_mode=ParseMode.MARKDOWN)
         except:
             pass
@@ -1464,7 +1502,8 @@ async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         "📝 **CONTACT ADMIN**\n\n"
         "Type your message below.\n"
-        "Admin will reply to you as soon as possible.",
+        "Admin will reply to you as soon as possible.\n\n"
+        "👨‍💻 **Developer:** @Senzo268",
         parse_mode=ParseMode.MARKDOWN,
     )
     context.user_data["waiting_for_message"] = True
@@ -1536,6 +1575,7 @@ async def my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"▫️ `{h['email']}` - {h['plan']}\n"
     
     text += f"\n⏳ **Cooldown:** {WORKING_COOLDOWN_MINUTES} min"
+    text += "\n\n👨‍💻 **Developer:** @Senzo268"
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_menu")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
@@ -1615,6 +1655,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")],
     ]
     
+    text += "\n\n👨‍💻 **Developer:** @Senzo268"
+    
     await query.edit_message_text(
         text,
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1634,7 +1676,8 @@ async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📤 **UPLOAD COOKIE FILE**\n\n"
         "Send a **.txt**, **.json**, or **.zip** file containing Netflix cookies.\n\n"
         "The bot will extract ALL cookies and check them.\n\n"
-        "⚠️ For **.zip** files, all .txt/.json files inside will be processed.",
+        "⚠️ For **.zip** files, all .txt/.json files inside will be processed.\n\n"
+        "👨‍💻 **Developer:** @Senzo268",
         parse_mode=ParseMode.MARKDOWN,
     )
     context.user_data["waiting_for_upload"] = True
@@ -1790,7 +1833,8 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"❌ **Invalid/Free:** {invalid}\n"
                 f"⚠️ **Errors:** {errors}\n"
                 f"💾 **Saved to DB:** {saved}\n\n"
-                f"📊 **New Total Available:** {get_total_accounts()['total']}",
+                f"📊 **New Total Available:** {get_total_accounts()['total']}\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN,
             )
         else:
@@ -1799,7 +1843,8 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"📁 File: {file_name}\n"
                 f"🔍 Total: {total_cookies}\n"
                 f"❌ Invalid/Free: {invalid}\n"
-                f"⚠️ Errors: {errors}",
+                f"⚠️ Errors: {errors}\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN,
             )
         
@@ -1838,6 +1883,7 @@ async def admin_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"\nAnd {len(reports) - 10} more..."
     
     keyboard.append([InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")])
+    text += "\n\n👨‍💻 **Developer:** @Senzo268"
     
     await query.edit_message_text(
         text,
@@ -1869,6 +1915,7 @@ async def admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton(f"#{msg['id']} - Reply", callback_data=f"reply_msg_{msg['id']}")])
     
     keyboard.append([InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")])
+    text += "\n\n👨‍💻 **Developer:** @Senzo268"
     
     await query.edit_message_text(
         text,
@@ -1889,7 +1936,8 @@ async def reply_message_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     await query.edit_message_text(
         f"📩 **Reply to Message #{msg_id}**\n\n"
-        f"Send: `/reply {msg_id} <your message>`",
+        f"Send: `/reply {msg_id} <your message>`\n\n"
+        f"👨‍💻 **Developer:** @Senzo268",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -1932,6 +1980,7 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append(nav_row)
     
     keyboard.append([InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")])
+    text += "\n\n👨‍💻 **Developer:** @Senzo268"
     
     context.user_data["users_page"] = page
     
@@ -1964,7 +2013,8 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         "📢 **BROADCAST**\n\n"
         "Send the message you want to broadcast to all users.\n\n"
-        "⚠️ This will send a message to **ALL** users.",
+        "⚠️ This will send a message to **ALL** users.\n\n"
+        "👨‍💻 **Developer:** @Senzo268",
         parse_mode=ParseMode.MARKDOWN,
     )
     context.user_data["waiting_for_broadcast"] = True
@@ -1991,6 +2041,7 @@ async def admin_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("❌ Remove Channel", callback_data="admin_remove_channel")],
         [InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")],
     ]
+    text += "\n\n👨‍💻 **Developer:** @Senzo268"
     
     await query.edit_message_text(
         text,
@@ -2012,7 +2063,8 @@ async def admin_add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Send in this format:\n"
         "`channel_id, channel_name, invite_link`\n\n"
         "Example:\n"
-        "`@mychannel, My Channel, https://t.me/mychannel`",
+        "`@mychannel, My Channel, https://t.me/mychannel`\n\n"
+        "👨‍💻 **Developer:** @Senzo268",
         parse_mode=ParseMode.MARKDOWN,
     )
     context.user_data["waiting_for_channel"] = True
@@ -2037,7 +2089,7 @@ async def admin_remove_channel(update: Update, context: ContextTypes.DEFAULT_TYP
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_channels")])
     
     await query.edit_message_text(
-        "Select channel to remove:",
+        "Select channel to remove:\n\n👨‍💻 **Developer:** @Senzo268",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -2052,7 +2104,7 @@ async def remove_channel_callback(update: Update, context: ContextTypes.DEFAULT_
     
     channel_id = query.data.replace("remove_ch_", "")
     remove_channel(channel_id)
-    await query.edit_message_text(f"✅ Channel {channel_id} has been removed!")
+    await query.edit_message_text(f"✅ Channel {channel_id} has been removed!\n\n👨‍💻 **Developer:** @Senzo268")
 
 async def admin_stock_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2073,6 +2125,7 @@ async def admin_stock_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"📁 {log['file_name']}\n   📅 {log['uploaded_at']}\n   🔍 Total: {log['total_found']} | ✅ Valid: {log['valid_found']}\n\n"
     
     keyboard = [[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")]]
+    text += "\n👨‍💻 **Developer:** @Senzo268"
     
     await query.edit_message_text(
         text,
@@ -2131,6 +2184,7 @@ async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"│ {day['date']}: ✅ {day['hits']} | ❌ {day['bad']}\n"
     
     keyboard = [[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")]]
+    text += "\n\n👨‍💻 **Developer:** @Senzo268"
     
     await query.edit_message_text(
         text,
@@ -2167,7 +2221,8 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
                 f"⚠️ **You have a pending report!**\n\n"
                 f"Please upload a screenshot proof for your **{pending['report_type'].upper()}** report.\n\n"
                 f"📸 Send a screenshot image now.\n\n"
-                f"❌ You cannot use other commands until you complete this report.",
+                f"❌ You cannot use other commands until you complete this report.\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -2179,7 +2234,8 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
         
         await update.message.reply_text(
             "✅ **Message sent to admin!**\n\n"
-            "You will receive a reply here when admin responds.",
+            "You will receive a reply here when admin responds.\n\n"
+            "👨‍💻 **Developer:** @Senzo268",
             parse_mode=ParseMode.MARKDOWN,
         )
         
@@ -2190,7 +2246,8 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
                     f"📩 **New Message from User**\n\n"
                     f"User: @{user.username or 'NoUsername'} (ID: `{user_id}`)\n"
                     f"Message: {text}\n\n"
-                    f"Use `/reply {msg_id} <your reply>` to respond.",
+                    f"Use `/reply {msg_id} <your reply>` to respond.\n\n"
+                    f"👨‍💻 **Developer:** @Senzo268",
                     parse_mode=ParseMode.MARKDOWN,
                 )
             except:
@@ -2204,10 +2261,11 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
             channel_id, channel_name, invite_link = parts
             add_channel(channel_id, channel_name, invite_link)
             context.user_data["waiting_for_channel"] = False
-            await update.message.reply_text(f"✅ Channel **{channel_name}** added!", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(f"✅ Channel **{channel_name}** added!\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
         else:
             await update.message.reply_text(
-                "❌ Invalid format. Use: `channel_id, channel_name, invite_link`",
+                "❌ Invalid format. Use: `channel_id, channel_name, invite_link`\n\n"
+                "👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN,
             )
         return
@@ -2228,7 +2286,7 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
             if u["is_banned"]:
                 continue
             try:
-                await context.bot.send_message(u["user_id"], text, parse_mode=ParseMode.MARKDOWN)
+                await context.bot.send_message(u["user_id"], text + "\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
                 sent += 1
             except:
                 failed += 1
@@ -2238,7 +2296,8 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
             f"✅ **BROADCAST COMPLETE!**\n\n"
             f"✅ Sent: **{sent}**\n"
             f"❌ Failed: **{failed}**\n"
-            f"📊 Total Users: **{len(users)}**",
+            f"📊 Total Users: **{len(users)}**\n\n"
+            f"👨‍💻 **Developer:** @Senzo268",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -2256,15 +2315,17 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
                         reply_to_message(msg_id, reply_text)
                         await context.bot.send_message(
                             target_user,
-                            f"📩 **Admin Reply:**\n\n{reply_text}",
+                            f"📩 **Admin Reply:**\n\n{reply_text}\n\n"
+                            f"👨‍💻 **Developer:** @Senzo268",
                             parse_mode=ParseMode.MARKDOWN,
                         )
-                        await update.message.reply_text("✅ Reply sent to user!")
+                        await update.message.reply_text("✅ Reply sent to user!\n\n👨‍💻 **Developer:** @Senzo268")
                     else:
                         await update.message.reply_text("❌ Message ID not found.")
                 except:
                     await update.message.reply_text(
-                        "❌ Invalid format. Use: `/reply <msg_id> <message>`",
+                        "❌ Invalid format. Use: `/reply <msg_id> <message>`\n\n"
+                        "👨‍💻 **Developer:** @Senzo268",
                         parse_mode=ParseMode.MARKDOWN,
                     )
             return
@@ -2273,14 +2334,14 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
             parts = text.split()
             if len(parts) == 2 and parts[1].isdigit():
                 ban_user(int(parts[1]), user_id)
-                await update.message.reply_text(f"✅ User `{parts[1]}` has been banned!", parse_mode=ParseMode.MARKDOWN)
+                await update.message.reply_text(f"✅ User `{parts[1]}` has been banned!\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
             return
         
         if text.startswith("/unban "):
             parts = text.split()
             if len(parts) == 2 and parts[1].isdigit():
                 unban_user(int(parts[1]))
-                await update.message.reply_text(f"✅ User `{parts[1]}` has been unbanned!", parse_mode=ParseMode.MARKDOWN)
+                await update.message.reply_text(f"✅ User `{parts[1]}` has been unbanned!\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
             return
     
     assigned = get_assigned_account(user_id)
@@ -2304,7 +2365,7 @@ async def handle_all_text_messages(update: Update, context: ContextTypes.DEFAULT
         keyboard.append([InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")])
     
     await update.message.reply_text(
-        "🤖 Use the buttons below:",
+        "🤖 Use the buttons below:\n\n👨‍💻 **Developer:** @Senzo268",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -2316,7 +2377,10 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Error: {context.error}")
     try:
         if update and update.effective_message:
-            await update.effective_message.reply_text("❌ An error occurred. Please try again.")
+            await update.effective_message.reply_text(
+                "❌ An error occurred. Please try again.\n\n"
+                "👨‍💻 **Developer:** @Senzo268"
+            )
     except:
         pass
 
@@ -2353,7 +2417,7 @@ def start_health_server():
 
 def main():
     print("=" * 70)
-    print("🎬 NETFLIX BOT - ULTIMATE EDITION")
+    print("🎬 SENZO NETFLIX BOT - ULTIMATE EDITION")
     print("=" * 70)
     print(f"📊 Database: {'Turso' if db.use_turso else 'SQLite'}")
     print(f"👤 Admins: {ADMIN_IDS}")
