@@ -84,7 +84,7 @@ CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", 20))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
 
 # ============================================================
-# DATABASE CLASS
+# DATABASE CLASS - FIXED TURSO SUPPORT
 # ============================================================
 class Database:
     _instance = None
@@ -100,22 +100,31 @@ class Database:
     
     def _initialize(self):
         self.use_turso = HAS_LIBSQL and TURSO_DATABASE_URL and TURSO_DATABASE_URL.startswith("libsql://")
+        self.conn = None
+        
         try:
             if self.use_turso:
-                self.conn = libsql.connect(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
-                logger.info(f"✅ Connected to Turso database")
+                # Turso connection
+                if TURSO_AUTH_TOKEN:
+                    self.conn = libsql.connect(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
+                else:
+                    self.conn = libsql.connect(TURSO_DATABASE_URL)
+                logger.info(f"✅ Connected to Turso database: {TURSO_DATABASE_URL}")
             else:
+                # SQLite fallback
                 self.conn = sqlite3.connect("bot.db", check_same_thread=False)
-                logger.info(f"✅ Connected to local SQLite database")
+                logger.info(f"✅ Connected to local SQLite database: bot.db")
             self._init_tables()
         except Exception as e:
             logger.warning(f"⚠️ Turso init failed ({e}). Falling back to SQLite.")
+            self.use_turso = False
             self.conn = sqlite3.connect("bot.db", check_same_thread=False)
             self._init_tables()
     
     def _init_tables(self):
         cur = self.conn.cursor()
         
+        # Users table
         cur.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -136,6 +145,7 @@ class Database:
             )
         ''')
         
+        # Accounts table
         cur.execute('''
             CREATE TABLE IF NOT EXISTS accounts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -170,6 +180,7 @@ class Database:
             )
         ''')
         
+        # Reports table
         cur.execute('''
             CREATE TABLE IF NOT EXISTS reports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,6 +196,7 @@ class Database:
             )
         ''')
         
+        # Messages table
         cur.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -197,6 +209,7 @@ class Database:
             )
         ''')
         
+        # Channels table
         cur.execute('''
             CREATE TABLE IF NOT EXISTS channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,6 +220,7 @@ class Database:
             )
         ''')
         
+        # Stock logs
         cur.execute('''
             CREATE TABLE IF NOT EXISTS stock_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -218,6 +232,7 @@ class Database:
             )
         ''')
         
+        # Settings
         cur.execute('''
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -226,6 +241,7 @@ class Database:
             )
         ''')
         
+        # Stats
         cur.execute('''
             CREATE TABLE IF NOT EXISTS stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -257,6 +273,7 @@ class Database:
     def close(self):
         self.conn.close()
 
+# Initialize database
 db = Database()
 
 # ============================================================
@@ -819,7 +836,8 @@ def check_account_full(cookies_dict: Dict) -> Dict:
                 match = re.search(pattern, text, re.IGNORECASE)
                 if match:
                     plan = match.group(1).strip()
-                    break            
+                    break
+            
             plan_key = "FREE"
             plan_label = "Free"
             if plan:
@@ -921,7 +939,7 @@ def check_account_full(cookies_dict: Dict) -> Dict:
             
             is_subscribed = plan_key != "FREE" or (membership_status and "current_member" in membership_status.lower())
             
-            # Generate NFToken for ALL accounts (FREE + PAID)
+            # Generate NFToken for ALL accounts
             nftoken = None
             nftoken_expiry = None
             nftoken, nftoken_expiry = generate_nftoken(cookies_dict.get("NetflixId"), attempts=3)
@@ -1173,7 +1191,7 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("❌ You haven't joined all channels yet!", show_alert=True)
 
 # ============================================================
-# GET ACCOUNT - AUTO NFToken IN URL
+# GET ACCOUNT - FIXED TOKEN IN URL
 # ============================================================
 
 async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1253,12 +1271,12 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = []
         
-        # Get NFToken from account
+        # Get token from account
         token = account.get('nftoken')
         
-        # ALWAYS show login buttons - with AUTO token in URL
-        if token and token != "None" and len(str(token)) > 10:
-            # NFToken exists - AUTO add token to URL
+        # Check if token is VALID (not None, not empty, length > 10)
+        if token and token != "None" and len(str(token).strip()) > 10:
+            # Valid token - show login buttons WITH token in URL
             keyboard.append([
                 InlineKeyboardButton("📱 Phone Login", url=f"https://netflix.com/unsupported?nftoken={token}"),
                 InlineKeyboardButton("🖥️ PC Login", url=f"https://netflix.com/login?nftoken={token}")
@@ -1269,7 +1287,7 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if account.get("nftoken_expiry"):
                 text += f"\n⏳ NFToken expires: `{account['nftoken_expiry']}`"
         else:
-            # No token - show direct Netflix links (user can login manually)
+            # No valid token - show direct login buttons WITHOUT token
             keyboard.append([
                 InlineKeyboardButton("📱 Phone Login", url="https://netflix.com/unsupported"),
                 InlineKeyboardButton("🖥️ PC Login", url="https://netflix.com/login")
