@@ -21,14 +21,8 @@ import traceback
 import requests
 import urllib3
 
-# ============================================================
-# SUPPRESS WARNINGS
-# ============================================================
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ============================================================
-# FIX ASYNCIO
-# ============================================================
 try:
     asyncio.get_running_loop()
 except RuntimeError:
@@ -37,17 +31,25 @@ except RuntimeError:
 ssl._create_default_https_context = ssl._create_unverified_context
 
 # ============================================================
-# IMPORT LIBRARIES
+# IMPORT LIBSQL - FIXED
 # ============================================================
+HAS_LIBSQL = False
 try:
     import libsql_experimental as libsql
     HAS_LIBSQL = True
+    print("✅ libsql-experimental loaded")
 except ImportError:
     try:
         import libsql
         HAS_LIBSQL = True
+        print("✅ libsql loaded")
     except ImportError:
-        HAS_LIBSQL = False
+        try:
+            import libsql_client as libsql
+            HAS_LIBSQL = True
+            print("✅ libsql_client loaded")
+        except ImportError:
+            print("❌ No libsql library found. Using SQLite fallback.")
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -67,7 +69,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "")
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
-REPORT_CHANNEL_ID = os.getenv("REPORT_CHANNEL_ID", "")  # NEW
+REPORT_CHANNEL_ID = os.getenv("REPORT_CHANNEL_ID", "")
 
 admin_ids_str = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(aid.strip()) for aid in admin_ids_str.split(",") if aid.strip().isdigit()]
@@ -78,17 +80,14 @@ MAX_CHECK_THREADS = int(os.getenv("MAX_THREADS", 20))
 CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", 20))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
 
-# ============================================================
-# LOGGING - SILENT
-# ============================================================
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.ERROR
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# DATABASE - TURSO FIRST
+# DATABASE - COMPLETE FIX
 # ============================================================
 class Database:
     _instance = None
@@ -103,25 +102,29 @@ class Database:
         return cls._instance
     
     def _initialize(self):
-        self.use_turso = HAS_LIBSQL and TURSO_DATABASE_URL and TURSO_DATABASE_URL.startswith("libsql://")
+        self.use_turso = False
         self.conn = None
         
-        if self.use_turso:
+        # TRY TURSO FIRST
+        if HAS_LIBSQL and TURSO_DATABASE_URL and TURSO_DATABASE_URL.startswith("libsql://"):
             try:
+                print(f"🔄 Connecting to Turso: {TURSO_DATABASE_URL}")
                 if TURSO_AUTH_TOKEN:
                     self.conn = libsql.connect(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
                 else:
                     self.conn = libsql.connect(TURSO_DATABASE_URL)
-                print(f"✅ Connected to Turso database (PERSISTENT)")
+                self.use_turso = True
+                print("✅ Turso connection successful!")
                 self._init_tables()
                 return
             except Exception as e:
-                print(f"⚠️ Turso failed: {e}")
+                print(f"⚠️ Turso connection failed: {e}")
                 self.use_turso = False
         
+        # FALLBACK TO SQLITE
         try:
             self.conn = sqlite3.connect("bot.db", check_same_thread=False)
-            print(f"✅ Connected to SQLite database (LOCAL)")
+            print("✅ Using SQLite database (fallback)")
             self._init_tables()
         except Exception as e:
             print(f"❌ Database error: {e}")
@@ -244,6 +247,7 @@ class Database:
             )
         ''')
         self.conn.commit()
+        print("✅ Tables created successfully")
     
     def execute(self, query, params=None):
         cur = self.conn.cursor()
@@ -767,23 +771,19 @@ def check_account(cookies_dict: Dict) -> Dict:
         return {"valid": False, "error": "Error"}
 
 # ============================================================
-# CHANNEL POST FUNCTION - NEW FEATURE
+# CHANNEL POST FUNCTION
 # ============================================================
 
 async def send_working_to_channel(bot, report_id: int, user_id: int, account_id: int, screenshot_file_id: str):
-    """Send working account post to channel with beautiful formatting."""
-    
     if not REPORT_CHANNEL_ID:
         return None
     
     try:
         user = get_user(user_id)
         account = get_assigned_account(user_id)
-        
         if not account:
             return None
         
-        # Build beautiful post
         text = f"""
 📱 **WORKING ACCOUNT FOUND!**
 
@@ -836,7 +836,6 @@ async def send_working_to_channel(bot, report_id: int, user_id: int, account_id:
 ⚠️ **This account is working!**
 """
         
-        # Add confirm button for admins
         keyboard.append([
             InlineKeyboardButton("✅ Confirm Working", callback_data=f"confirm_working_{report_id}_{account_id}")
         ])
@@ -844,7 +843,6 @@ async def send_working_to_channel(bot, report_id: int, user_id: int, account_id:
             InlineKeyboardButton("❌ Mark Not Working", callback_data=f"confirm_notworking_{report_id}_{account_id}")
         ])
         
-        # Send photo + caption to channel
         try:
             sent_message = await bot.send_photo(
                 chat_id=REPORT_CHANNEL_ID,
@@ -853,14 +851,9 @@ async def send_working_to_channel(bot, report_id: int, user_id: int, account_id:
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode=ParseMode.MARKDOWN
             )
-            
-            # Save channel post ID
             update_report_channel_post(report_id, sent_message.message_id)
-            
             return sent_message.message_id
-            
-        except Exception as e:
-            # If photo fails, send text only
+        except Exception:
             try:
                 sent_message = await bot.send_message(
                     chat_id=REPORT_CHANNEL_ID,
@@ -872,20 +865,16 @@ async def send_working_to_channel(bot, report_id: int, user_id: int, account_id:
                 return sent_message.message_id
             except Exception:
                 return None
-                
     except Exception:
         return None
 
 async def send_notworking_to_channel(bot, report_id: int, user_id: int, account_id: int, screenshot_file_id: str):
-    """Send not working account post to channel."""
-    
     if not REPORT_CHANNEL_ID:
         return None
     
     try:
         user = get_user(user_id)
         account = get_assigned_account(user_id)
-        
         if not account:
             return None
         
@@ -933,49 +922,35 @@ async def send_notworking_to_channel(bot, report_id: int, user_id: int, account_
                 return sent_message.message_id
             except Exception:
                 return None
-                
     except Exception:
         return None
 
 # ============================================================
-# CONFIRM WORKING CALLBACK - CHANNEL BUTTON
+# CONFIRM WORKING CALLBACK
 # ============================================================
 
 async def confirm_working_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin confirms account is working from channel post."""
     try:
         query = update.callback_query
         await query.answer()
-        
         data = query.data
         parts = data.split("_")
-        
         if len(parts) < 4:
             return
-        
         action = parts[1]
         report_id = int(parts[2])
         account_id = int(parts[3])
-        
         user_id = query.from_user.id
-        
         if user_id not in ADMIN_IDS:
             await query.answer("⛔ Not authorized!", show_alert=True)
             return
-        
         if action == "working":
-            # Confirm working
             confirm_account_working(account_id, report_id, user_id)
-            
-            # Update channel message
             await query.edit_message_caption(
                 caption=query.message.caption + "\n\n✅ **CONFIRMED WORKING by Admin!**",
                 parse_mode=ParseMode.MARKDOWN
             )
-            
             await query.answer("✅ Account confirmed working!")
-            
-            # Notify user
             cur = db.execute('SELECT user_id FROM reports WHERE id = ?', (report_id,))
             row = cur.fetchone()
             if row:
@@ -989,21 +964,15 @@ async def confirm_working_callback(update: Update, context: ContextTypes.DEFAULT
                     )
                 except Exception:
                     pass
-                    
         elif action == "notworking":
-            # Mark as not working
             db.execute('UPDATE accounts SET is_working = 0, status = "broken" WHERE id = ?', (account_id,))
             db.execute('UPDATE reports SET status = "accepted", reviewed_at = CURRENT_TIMESTAMP, admin_id = ? WHERE id = ?', (user_id, report_id))
             db.commit()
-            
             await query.edit_message_caption(
                 caption=query.message.caption + "\n\n❌ **MARKED AS NOT WORKING by Admin!**",
                 parse_mode=ParseMode.MARKDOWN
             )
-            
             await query.answer("❌ Account marked as not working!")
-            
-            # Notify user
             cur = db.execute('SELECT user_id FROM reports WHERE id = ?', (report_id,))
             row = cur.fetchone()
             if row:
@@ -1017,7 +986,6 @@ async def confirm_working_callback(update: Update, context: ContextTypes.DEFAULT
                     )
                 except Exception:
                     pass
-                    
     except Exception:
         pass
 
@@ -1030,22 +998,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         user_id = user.id
         user_data = get_user(user_id)
-        
         if safe_bool(user_data.get("pending_report")):
             await update.message.reply_text(
-                f"⚠️ **You have a pending report!**\n\n"
-                f"Please upload a screenshot proof.\n\n"
-                f"👨‍💻 **Developer:** @Senzo268",
+                f"⚠️ **You have a pending report!**\n\nPlease upload a screenshot proof.\n\n👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN
             )
             return
-        
         create_user(user_id, safe_str(user.username), safe_str(user.first_name))
-        
         if safe_bool(user_data.get("is_banned")):
             await update.message.reply_text("🚫 You are banned.")
             return
-        
         stats = get_total_accounts()
         plan_display = ""
         for plan, count in stats.get('plans', {}).items():
@@ -1053,7 +1015,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             plan_display += f"│ {emoji} {plan}: **{count}**\n"
         if not plan_display:
             plan_display = "│ No accounts available\n"
-        
         assigned = get_assigned_account(user_id)
         keyboard = [
             [InlineKeyboardButton("🎯 Get Account", callback_data="get_account")],
@@ -1069,7 +1030,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         if safe_bool(user_data.get("is_admin")) or user_id in ADMIN_IDS:
             keyboard.append([InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")])
-        
         text = f"""
 🌟 **WELCOME TO SENZO NETFLIX BOT** 🌟
 ━━━━━━━━━━━━━━━━━━━━━
@@ -1100,27 +1060,22 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         user_id = query.from_user.id
         user_data = get_user(user_id)
-        
         if safe_bool(user_data.get("is_banned")):
             await query.edit_message_text("🚫 You are banned.")
             return
-        
         can_get, msg = can_get_account(user_id)
         if not can_get:
             await query.edit_message_text(msg)
             return
-        
         account = assign_account(user_id)
         if not account:
             await query.edit_message_text("❌ No accounts available.")
             return
-        
         cookie_full = safe_str(account.get('cookies', 'No cookies available'))
         if len(cookie_full) > 3900:
             cookie_display = cookie_full[:3900] + "\n\n... (cookie truncated)"
         else:
             cookie_display = cookie_full
-        
         text = f"""
 🎉 **ACCOUNT ASSIGNED!**
 ━━━━━━━━━━━━━━━━━━━━━
@@ -1148,7 +1103,6 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
         keyboard = []
         token = safe_str(account.get('nftoken'))
-        
         if token and len(token) > 10:
             keyboard.append([
                 InlineKeyboardButton("📱 Phone Login", url=f"https://netflix.com/unsupported?nftoken={token}"),
@@ -1168,7 +1122,6 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("📺 TV Login", url="https://netflix.com/tv8")
             ])
             text += "\n\n💡 Use cookie with cookie editor extension."
-        
         text += "\n\n✅ **After testing, report below:**"
         keyboard.append([
             InlineKeyboardButton("✅ Working", callback_data=f"report_working_{account['id']}"),
@@ -1176,7 +1129,6 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")])
         text += "\n\n👨‍💻 **Developer:** @Senzo268"
-        
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
@@ -1187,16 +1139,13 @@ async def working_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         user_id = query.from_user.id
         user_data = get_user(user_id)
-        
         if safe_bool(user_data.get("pending_report")):
             await query.edit_message_text("⚠️ You have a pending report! Upload screenshot first.")
             return
-        
         assigned = get_assigned_account(user_id)
         if not assigned:
             await query.edit_message_text("⚠️ No active account! Get Account first.")
             return
-        
         try:
             db.execute('''
                 UPDATE users 
@@ -1206,12 +1155,8 @@ async def working_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.commit()
         except Exception:
             pass
-        
         await query.edit_message_text(
-            "✅ **Report: WORKING**\n\n"
-            "📸 **Please upload a screenshot proof.**\n\n"
-            "⚠️ Your report will be sent to channel for verification.\n\n"
-            "👨‍💻 **Developer:** @Senzo268",
+            "✅ **Report: WORKING**\n\n📸 **Please upload a screenshot proof.**\n\n⚠️ Your report will be sent to channel for verification.\n\n👨‍💻 **Developer:** @Senzo268",
             parse_mode=ParseMode.MARKDOWN
         )
     except Exception:
@@ -1223,16 +1168,13 @@ async def notworking_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer()
         user_id = query.from_user.id
         user_data = get_user(user_id)
-        
         if safe_bool(user_data.get("pending_report")):
             await query.edit_message_text("⚠️ You have a pending report! Upload screenshot first.")
             return
-        
         assigned = get_assigned_account(user_id)
         if not assigned:
             await query.edit_message_text("⚠️ No active account! Get Account first.")
             return
-        
         try:
             db.execute('''
                 UPDATE users 
@@ -1242,12 +1184,8 @@ async def notworking_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             db.commit()
         except Exception:
             pass
-        
         await query.edit_message_text(
-            "❌ **Report: NOT WORKING**\n\n"
-            "📸 **Please upload a screenshot proof.**\n\n"
-            "⚠️ Your report will be sent to channel.\n\n"
-            "👨‍💻 **Developer:** @Senzo268",
+            "❌ **Report: NOT WORKING**\n\n📸 **Please upload a screenshot proof.**\n\n⚠️ Your report will be sent to channel.\n\n👨‍💻 **Developer:** @Senzo268",
             parse_mode=ParseMode.MARKDOWN
         )
     except Exception:
@@ -1257,78 +1195,46 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
         user_data = get_user(user_id)
-        
         if not safe_bool(user_data.get("pending_report")):
             await update.message.reply_text("❌ No pending report.")
             return
-        
         photo = update.message.photo
         if not photo:
             await update.message.reply_text("❌ Please upload an image.")
             return
-        
         account_id = safe_int(user_data.get("pending_report_account_id"))
         report_type = safe_str(user_data.get("pending_report_type"))
         file_id = photo[-1].file_id
-        
         try:
             cur = db.execute('''
                 INSERT INTO reports (user_id, account_id, report_type, screenshot_file_id)
                 VALUES (?, ?, ?, ?)
             ''', (user_id, account_id, report_type, file_id))
             report_id = cur.lastrowid
-            
-            # Update user stats
             if report_type == "working":
                 db.execute('UPDATE users SET working_reports = working_reports + 1 WHERE user_id = ?', (user_id,))
             else:
                 db.execute('UPDATE users SET notworking_reports = notworking_reports + 1 WHERE user_id = ?', (user_id,))
-            
-            # Clear pending report
             db.execute('''
                 UPDATE users 
                 SET pending_report = 0, pending_report_account_id = NULL, pending_report_type = NULL
                 WHERE user_id = ?
             ''', (user_id,))
             db.commit()
-            
         except Exception:
             await update.message.reply_text("❌ Error saving report.")
             return
-        
         await update.message.reply_text(
-            f"✅ **Report submitted!**\n\n"
-            f"Report ID: #{report_id}\n"
-            f"Type: {report_type.upper()}\n\n"
-            f"Your report is being sent to channel for verification.\n"
-            f"👨‍💻 **Developer:** @Senzo268",
+            f"✅ **Report submitted!**\n\nReport ID: #{report_id}\nType: {report_type.upper()}\n\nYour report is being sent to channel for verification.\n👨‍💻 **Developer:** @Senzo268",
             parse_mode=ParseMode.MARKDOWN
         )
-        
-        # Send to channel based on report type
         if report_type == "working":
-            await send_working_to_channel(
-                context.bot,
-                report_id,
-                user_id,
-                account_id,
-                file_id
-            )
+            await send_working_to_channel(context.bot, report_id, user_id, account_id, file_id)
         else:
-            await send_notworking_to_channel(
-                context.bot,
-                report_id,
-                user_id,
-                account_id,
-                file_id
-            )
-        
-        # Release account
+            await send_notworking_to_channel(context.bot, report_id, user_id, account_id, file_id)
         release_account(account_id)
-        
     except Exception:
         await update.message.reply_text("❌ Error processing report.")
-        pass
 
 async def my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1337,7 +1243,6 @@ async def my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = query.from_user.id
         user = get_user(user_id)
         account = get_assigned_account(user_id)
-        
         text = f"""
 📊 **YOUR STATUS**
 ━━━━━━━━━━━━━━━━━━━━━
@@ -1364,7 +1269,6 @@ async def my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
         else:
             text += "❌ None\n"
-        
         text += f"\n⏳ **Cooldown:** {WORKING_COOLDOWN_MINUTES} min"
         text += "\n\n👨‍💻 **Developer:** @Senzo268"
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_menu")]]
@@ -1377,9 +1281,7 @@ async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         await query.edit_message_text(
-            "📝 **CONTACT ADMIN**\n\n"
-            "Type your message below.\n"
-            "👨‍💻 **Developer:** @Senzo268",
+            "📝 **CONTACT ADMIN**\n\nType your message below.\n👨‍💻 **Developer:** @Senzo268",
             parse_mode=ParseMode.MARKDOWN
         )
         context.user_data["waiting_for_message"] = True
@@ -1403,11 +1305,9 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
-        
         if user_id not in ADMIN_IDS:
             await query.answer("⛔ Not authorized!", show_alert=True)
             return
-        
         stats = get_total_accounts()
         keyboard = [
             [InlineKeyboardButton("📤 Upload Stock", callback_data="admin_upload")],
@@ -1445,15 +1345,11 @@ async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
-        
         if user_id not in ADMIN_IDS:
             await query.answer("⛔ Not authorized!", show_alert=True)
             return
-        
         await query.edit_message_text(
-            "📤 **UPLOAD COOKIE FILE**\n\n"
-            "Send a **.txt**, **.json**, or **.zip** file.\n\n"
-            "👨‍💻 **Developer:** @Senzo268",
+            "📤 **UPLOAD COOKIE FILE**\n\nSend a **.txt**, **.json**, or **.zip** file.\n\n👨‍💻 **Developer:** @Senzo268",
             parse_mode=ParseMode.MARKDOWN
         )
         context.user_data["waiting_for_upload"] = True
@@ -1463,48 +1359,37 @@ async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
-        
         if user_id not in ADMIN_IDS:
             await update.message.reply_text("⛔ Not authorized!")
             return
-        
         if not context.user_data.get("waiting_for_upload"):
             return
-        
         document = update.message.document
         if not document:
             await update.message.reply_text("❌ Please send a file.")
             return
-        
         file_name = document.file_name
         if not file_name.lower().endswith(('.txt', '.json', '.zip')):
             await update.message.reply_text("❌ Please send .txt, .json, or .zip.")
             return
-        
         await update.message.reply_text(f"⏳ Processing **{file_name}**...")
-        
         file = await context.bot.get_file(document.file_id)
         file_content = await file.download_as_bytearray()
         content = file_content.decode('utf-8', errors='ignore')
-        
         cookie_pairs = extract_cookie_pairs(content)
         if not cookie_pairs:
             await update.message.reply_text("❌ No Netflix cookies found.")
             context.user_data["waiting_for_upload"] = False
             return
-        
         total = len(cookie_pairs)
         valid = 0
         accounts = []
-        
         progress_msg = await update.message.reply_text(f"🔄 Checking {total} cookies...")
-        
         for i, (nid, sid) in enumerate(cookie_pairs):
             cookies_dict = {"NetflixId": nid}
             if sid:
                 cookies_dict["SecureNetflixId"] = sid
             result = check_account(cookies_dict)
-            
             if result.get("valid") and result.get("subscribed"):
                 cookie_text = get_cookie_text(nid, sid)
                 accounts.append({
@@ -1531,31 +1416,20 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     "user_guid": safe_str(result.get("user_guid")),
                 })
                 valid += 1
-            
             if (i + 1) % 10 == 0 or (i + 1) == total:
                 await progress_msg.edit_text(f"🔄 Checking... {i+1}/{total} | ✅ Valid: {valid}")
-        
         if accounts:
             saved = save_account_batch(accounts)
             log_stock(user_id, file_name, total, saved)
             await progress_msg.edit_text(
-                f"✅ **UPLOAD COMPLETE!**\n\n"
-                f"📁 File: {file_name}\n"
-                f"🔍 Total: {total}\n"
-                f"✅ Valid: {valid}\n"
-                f"💾 Saved: {saved}\n\n"
-                f"👨‍💻 **Developer:** @Senzo268",
+                f"✅ **UPLOAD COMPLETE!**\n\n📁 File: {file_name}\n🔍 Total: {total}\n✅ Valid: {valid}\n💾 Saved: {saved}\n\n👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN
             )
         else:
             await progress_msg.edit_text(
-                f"❌ **NO VALID ACCOUNTS FOUND!**\n\n"
-                f"📁 File: {file_name}\n"
-                f"🔍 Total: {total}\n\n"
-                f"👨‍💻 **Developer:** @Senzo268",
+                f"❌ **NO VALID ACCOUNTS FOUND!**\n\n📁 File: {file_name}\n🔍 Total: {total}\n\n👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN
             )
-        
         context.user_data["waiting_for_upload"] = False
     except Exception:
         context.user_data["waiting_for_upload"] = False
@@ -1615,17 +1489,13 @@ async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
-        
         if context.user_data.get("waiting_for_message"):
             await update.message.reply_text(
-                "✅ **Message sent to admin!**\n\n"
-                "You will receive a reply here.\n\n"
-                "👨‍💻 **Developer:** @Senzo268",
+                "✅ **Message sent to admin!**\n\nYou will receive a reply here.\n\n👨‍💻 **Developer:** @Senzo268",
                 parse_mode=ParseMode.MARKDOWN
             )
             context.user_data["waiting_for_message"] = False
             return
-        
         await start(update, context)
     except Exception:
         pass
@@ -1650,11 +1520,9 @@ def main():
     
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", start))
     
-    # Callbacks
     application.add_handler(CallbackQueryHandler(get_account, pattern="^get_account$"))
     application.add_handler(CallbackQueryHandler(working_callback, pattern="^working$"))
     application.add_handler(CallbackQueryHandler(notworking_callback, pattern="^notworking$"))
@@ -1662,7 +1530,6 @@ def main():
     application.add_handler(CallbackQueryHandler(my_status, pattern="^my_status$"))
     application.add_handler(CallbackQueryHandler(back_to_menu, pattern="^back_menu$"))
     
-    # Admin callbacks
     application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
     application.add_handler(CallbackQueryHandler(admin_upload, pattern="^admin_upload$"))
     application.add_handler(CallbackQueryHandler(admin_reports, pattern="^admin_reports$"))
@@ -1672,10 +1539,8 @@ def main():
     application.add_handler(CallbackQueryHandler(admin_stock_logs, pattern="^admin_stock_logs$"))
     application.add_handler(CallbackQueryHandler(admin_dashboard, pattern="^admin_dashboard$"))
     
-    # Channel confirm callback
     application.add_handler(CallbackQueryHandler(confirm_working_callback, pattern="^confirm_"))
     
-    # Message handlers
     application.add_handler(MessageHandler(filters.PHOTO, handle_screenshot))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_file_upload))
     application.add_handler(MessageHandler(filters.TEXT, handle_text_messages))
