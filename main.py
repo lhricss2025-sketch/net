@@ -137,6 +137,7 @@ class Database:
         self.use_turso = False
         self.conn = None
         self.db_lock = threading.Lock()
+        self.db_type = "SQLite"
         
         if HAS_LIBSQL and TURSO_DATABASE_URL and TURSO_DATABASE_URL.startswith("libsql://"):
             try:
@@ -146,12 +147,14 @@ class Database:
                 else:
                     self.conn = libsql.connect(TURSO_DATABASE_URL)
                 self.use_turso = True
+                self.db_type = "Turso"
                 print("✅ Turso connection successful!")
                 self._init_tables()
                 return
             except Exception as e:
                 print(f"⚠️ Turso connection failed: {e}")
                 self.use_turso = False
+                self.db_type = "SQLite"
         
         try:
             self.conn = sqlite3.connect("bot.db", check_same_thread=False)
@@ -1988,21 +1991,32 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         banned = get_banned_users()
         pending_reps = get_pending_reports()
         
+        # Database type display
+        db_type = "Turso (Cloud)" if db.use_turso else "SQLite (Local)"
+        db_emoji = "✅" if db.use_turso else "⚠️"
+        
         keyboard = [
             [InlineKeyboardButton("📤 Upload Stock", callback_data="admin_upload"), InlineKeyboardButton("📦 Manage Stock", callback_data="admin_stock_mgr")],
             [InlineKeyboardButton("👁️ View Reports", callback_data="admin_reports"), InlineKeyboardButton("👥 Manage Users", callback_data="admin_users")],
             [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"), InlineKeyboardButton("⚙️ Channels", callback_data="admin_channels")],
             [InlineKeyboardButton("📊 Stock Logs", callback_data="admin_stock_logs"), InlineKeyboardButton("📈 Dashboard", callback_data="admin_dashboard")],
             [InlineKeyboardButton("🚫 Banned Users", callback_data="admin_banned"), InlineKeyboardButton("🔍 Search User", callback_data="admin_user_search")],
-            [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")],
         ]
+        
+        # Database Switch Buttons
+        keyboard.append([
+            InlineKeyboardButton("🔄 Switch to SQLite", callback_data="switch_sqlite"),
+            InlineKeyboardButton("🔄 Switch to Turso", callback_data="switch_turso")
+        ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")])
         
         text = f"""⚙️ <b>ADMIN CONTROL PANEL</b>
 ━━━━━━━━━━━━━━━━━━━━━
 🖥️ <b>SYSTEM STATUS</b>
 ┌─────────────────────
 │ Status: <b>🟢 ONLINE</b>
-│ Database: <b>{'✅ Turso (Cloud)' if db.use_turso else '⚠️ SQLite (Local)'}</b>
+│ Database: <b>{db_emoji} {db_type}</b>
 │ Check Threads: <b>{MAX_CHECK_THREADS}</b>
 │ Report Channel: <b>{'✅ Connected' if REPORT_CHANNEL_ID else '❌ Not Configured'}</b>
 └─────────────────────
@@ -2012,12 +2026,96 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 │ 📋 Pending Reports: <b>{len(pending_reps)}</b>
 │ 🚫 Banned Users: <b>{len(banned)}</b>
 └─────────────────────
+🔽 <b>DATABASE SWITCH:</b>
+<i>Switch database type if current one is not saving properly.</i>
 🔽 <b>SELECT ADMIN ACTION:</b>
 👨‍💻 <b>Developer:</b> @Senzo268
 """
         await send_or_edit(update, text, reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         logger.error(f"Error in admin_panel: {e}")
+
+# ============================================================
+# DATABASE SWITCH FUNCTIONS - NEW FEATURE
+# ============================================================
+
+async def switch_to_sqlite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Switch database to SQLite."""
+    try:
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        
+        if user_id not in ADMIN_IDS:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        
+        # Update environment variable
+        os.environ["TURSO_DATABASE_URL"] = ""
+        os.environ["TURSO_AUTH_TOKEN"] = ""
+        
+        # Reinitialize database
+        global db
+        db = Database()
+        
+        await query.edit_message_text(
+            "✅ <b>Database switched to SQLite (Local)!</b>\n\n"
+            "🔄 Bot will now use SQLite database.\n"
+            "⚠️ Data is stored locally in bot.db file.\n\n"
+            "👨‍💻 <b>Developer:</b> @Senzo268",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"Error switching to SQLite: {e}")
+        await send_or_edit(update, f"❌ Failed to switch database: {e}")
+
+async def switch_to_turso(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Switch database to Turso."""
+    try:
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        
+        if user_id not in ADMIN_IDS:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        
+        if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
+            await query.edit_message_text(
+                "❌ <b>Turso credentials not configured!</b>\n\n"
+                "Please set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in .env file.\n\n"
+                "👨‍💻 <b>Developer:</b> @Senzo268",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # Reinitialize database with Turso
+        global db
+        db = Database()
+        
+        if db.use_turso:
+            await query.edit_message_text(
+                "✅ <b>Database switched to Turso (Cloud)!</b>\n\n"
+                "🔄 Bot will now use Turso cloud database.\n"
+                "✅ Data is persistent and won't be lost on redeploy.\n\n"
+                "👨‍💻 <b>Developer:</b> @Senzo268",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await query.edit_message_text(
+                "❌ <b>Failed to connect to Turso!</b>\n\n"
+                "⚠️ Check your TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.\n"
+                "⚠️ Make sure your Turso database is active.\n\n"
+                "👨‍💻 <b>Developer:</b> @Senzo268",
+                parse_mode=ParseMode.HTML
+            )
+    except Exception as e:
+        logger.error(f"Error switching to Turso: {e}")
+        await send_or_edit(update, f"❌ Failed to switch database: {e}")
+
+# ============================================================
+# ADMIN STOCK MANAGER & OTHER ADMIN FUNCTIONS
+# ============================================================
 
 async def admin_stock_mgr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -2169,10 +2267,6 @@ async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in admin_upload: {e}")
 
-# ============================================================
-# FIXED: handle_file_upload - SHOWS PROGRESS & SAVES PROPERLY
-# ============================================================
-
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
@@ -2275,7 +2369,6 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     })
                     valid += 1
                 
-                # Update progress every 5 accounts
                 if completed % 5 == 0 or completed == total:
                     try:
                         await status_msg.edit_text(
@@ -2285,7 +2378,6 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     except Exception:
                         pass
                         
-        # Save accounts after all checks are complete
         if accounts:
             saved = save_account_batch(accounts)
             log_stock(user_id, file_name, total, saved)
@@ -2876,6 +2968,10 @@ def main():
     application.add_handler(CallbackQueryHandler(del_channel_callback, pattern="^del_channel_"))
     application.add_handler(CallbackQueryHandler(admin_stock_logs, pattern="^admin_stock_logs$"))
     application.add_handler(CallbackQueryHandler(admin_dashboard, pattern="^admin_dashboard$"))
+    
+    # Database Switch Callbacks
+    application.add_handler(CallbackQueryHandler(switch_to_sqlite, pattern="^switch_sqlite$"))
+    application.add_handler(CallbackQueryHandler(switch_to_turso, pattern="^switch_turso$"))
     
     # Channel Action Callbacks
     application.add_handler(CallbackQueryHandler(confirm_working_callback, pattern="^confirm_working_"))
