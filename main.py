@@ -16,7 +16,6 @@ from typing import Dict, List, Optional, Tuple, Any
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
-import traceback
 
 import requests
 import urllib3
@@ -44,12 +43,7 @@ except ImportError:
         HAS_LIBSQL = True
         print("✅ libsql loaded")
     except ImportError:
-        try:
-            import libsql_client as libsql
-            HAS_LIBSQL = True
-            print("✅ libsql_client loaded")
-        except ImportError:
-            print("❌ No libsql library found. Using SQLite fallback.")
+        print("❌ No libsql library found. Using SQLite fallback.")
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -105,7 +99,6 @@ class Database:
         self.use_turso = False
         self.conn = None
         
-        # TRY TURSO FIRST
         if HAS_LIBSQL and TURSO_DATABASE_URL and TURSO_DATABASE_URL.startswith("libsql://"):
             try:
                 print(f"🔄 Connecting to Turso: {TURSO_DATABASE_URL}")
@@ -121,7 +114,6 @@ class Database:
                 print(f"⚠️ Turso connection failed: {e}")
                 self.use_turso = False
         
-        # FALLBACK TO SQLITE
         try:
             self.conn = sqlite3.connect("bot.db", check_same_thread=False)
             print("✅ Using SQLite database (fallback)")
@@ -771,7 +763,7 @@ def check_account(cookies_dict: Dict) -> Dict:
         return {"valid": False, "error": "Error"}
 
 # ============================================================
-# CHANNEL POST FUNCTION
+# CHANNEL POST FUNCTIONS
 # ============================================================
 
 async def send_working_to_channel(bot, report_id: int, user_id: int, account_id: int, screenshot_file_id: str):
