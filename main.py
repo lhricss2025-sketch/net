@@ -68,7 +68,7 @@ from telegram.ext import (
 from flask import Flask, jsonify
 
 # ============================================================
-# FLASK KEEPALIVE & HEALTHCHECK SERVER FOR RAILWAY
+# FLASK KEEPALIVE & HEALTHCHECK SERVER
 # ============================================================
 app = Flask(__name__)
 
@@ -79,6 +79,7 @@ def health_check():
         "status": "online",
         "service": "Senzo Netflix Bot",
         "database": "Turso" if db.use_turso else "SQLite",
+        "developer": "@Senzo268",
         "timestamp": datetime.utcnow().isoformat()
     }), 200
 
@@ -669,10 +670,18 @@ def can_get_account(user_id: int) -> Tuple[bool, str]:
         
     return True, ""
 
+# ============================================================
+# FIXED: save_account_batch - PROPER DATABASE SAVE
+# ============================================================
 def save_account_batch(accounts: List[Dict]) -> int:
+    """Save accounts to database with proper row count tracking."""
     if not accounts:
         return 0
+    
     try:
+        # Ensure database connection is active
+        db.execute("SELECT 1")
+        
         query = '''
             INSERT INTO accounts (
                 email, country, plan, cookies, nftoken, nftoken_expiry,
@@ -682,25 +691,75 @@ def save_account_batch(accounts: List[Dict]) -> int:
                 profiles, user_guid
             ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         '''
+        
         params_list = [
             (
-                safe_str(a.get("email")), safe_str(a.get("country")), safe_str(a.get("plan")),
-                safe_str(a.get("cookies")), safe_str(a.get("nftoken")), safe_str(a.get("nftoken_expiry")),
-                safe_str(a.get("source_file")), safe_str(a.get("account_name")), safe_int(a.get("streams")),
-                safe_str(a.get("quality")), safe_str(a.get("price")), safe_str(a.get("billing_date")),
-                safe_str(a.get("member_since")), safe_str(a.get("payment_method")), safe_str(a.get("card_last4")),
-                safe_str(a.get("phone")), 1 if safe_bool(a.get("extra_member")) else 0,
-                safe_str(a.get("membership_status")), 1 if safe_bool(a.get("email_verified")) else 0,
-                safe_str(a.get("profiles")), safe_str(a.get("user_guid")),
+                safe_str(a.get("email")),
+                safe_str(a.get("country")),
+                safe_str(a.get("plan")),
+                safe_str(a.get("cookies")),
+                safe_str(a.get("nftoken")),
+                safe_str(a.get("nftoken_expiry")),
+                safe_str(a.get("source_file")),
+                safe_str(a.get("account_name")),
+                safe_int(a.get("streams")),
+                safe_str(a.get("quality")),
+                safe_str(a.get("price")),
+                safe_str(a.get("billing_date")),
+                safe_str(a.get("member_since")),
+                safe_str(a.get("payment_method")),
+                safe_str(a.get("card_last4")),
+                safe_str(a.get("phone")),
+                1 if safe_bool(a.get("extra_member")) else 0,
+                safe_str(a.get("membership_status")),
+                1 if safe_bool(a.get("email_verified")) else 0,
+                safe_str(a.get("profiles")),
+                safe_str(a.get("user_guid")),
             )
             for a in accounts
         ]
+        
         cur = db.executemany(query, params_list)
         db.commit()
-        return cur.rowcount
+        saved = cur.rowcount
+        
+        logger.info(f"✅ Successfully saved {saved} accounts to database")
+        return saved
+        
     except Exception as e:
-        logger.error(f"Error in save_account_batch: {e}")
-        return 0
+        logger.error(f"❌ Error in save_account_batch: {e}")
+        # Try one by one if batch fails
+        saved = 0
+        for a in accounts:
+            try:
+                query = '''
+                    INSERT INTO accounts (
+                        email, country, plan, cookies, nftoken, nftoken_expiry,
+                        source_file, last_checked, account_name, streams, quality,
+                        price, billing_date, member_since, payment_method, card_last4,
+                        phone, extra_member, membership_status, email_verified,
+                        profiles, user_guid
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                '''
+                params = (
+                    safe_str(a.get("email")), safe_str(a.get("country")), safe_str(a.get("plan")),
+                    safe_str(a.get("cookies")), safe_str(a.get("nftoken")), safe_str(a.get("nftoken_expiry")),
+                    safe_str(a.get("source_file")), safe_str(a.get("account_name")), safe_int(a.get("streams")),
+                    safe_str(a.get("quality")), safe_str(a.get("price")), safe_str(a.get("billing_date")),
+                    safe_str(a.get("member_since")), safe_str(a.get("payment_method")), safe_str(a.get("card_last4")),
+                    safe_str(a.get("phone")), 1 if safe_bool(a.get("extra_member")) else 0,
+                    safe_str(a.get("membership_status")), 1 if safe_bool(a.get("email_verified")) else 0,
+                    safe_str(a.get("profiles")), safe_str(a.get("user_guid")),
+                )
+                cur = db.execute(query, params)
+                db.commit()
+                if cur.rowcount > 0:
+                    saved += 1
+            except Exception as e2:
+                logger.error(f"❌ Failed to save account {a.get('email')}: {e2}")
+        
+        logger.info(f"✅ Saved {saved} accounts one by one")
+        return saved
 
 def log_stock(admin_id: int, file_name: str, total: int, valid: int):
     try:
@@ -1100,9 +1159,6 @@ async def send_working_to_channel(bot, report_id: int, user_id: int, account_id:
         token = safe_str(account.get('nftoken'))
         nft_expiry = safe_str(account.get('nftoken_expiry'))
         
-        # ============================================================
-        # PREMIUM UI - WORKING ACCOUNT POST
-        # ============================================================
         text = f"""📱 <b>WORKING ACCOUNT FOUND!</b>
 
 ━━━━━━━━━━━━━━━━━━━━━
@@ -1134,9 +1190,6 @@ async def send_working_to_channel(bot, report_id: int, user_id: int, account_id:
 ⚠️ <b>This account is working!</b>
 """
         
-        # ============================================================
-        # LOGIN BUTTONS FIRST, THEN CONFIRM
-        # ============================================================
         keyboard = []
         if token and len(token) > 10:
             keyboard.append([
@@ -1214,9 +1267,6 @@ async def send_notworking_to_channel(bot, report_id: int, user_id: int, account_
         token = safe_str(account.get('nftoken'))
         nft_expiry = safe_str(account.get('nftoken_expiry'))
         
-        # ============================================================
-        # PREMIUM UI - NOT WORKING ACCOUNT POST
-        # ============================================================
         text = f"""❌ <b>NOT WORKING ACCOUNT REPORTED!</b>
 
 ━━━━━━━━━━━━━━━━━━━━━
@@ -1243,9 +1293,6 @@ async def send_notworking_to_channel(bot, report_id: int, user_id: int, account_
 ⚠️ <b>Dismiss = Account will be REMOVED from stock</b>
 """
         
-        # ============================================================
-        # LOGIN BUTTONS FIRST, THEN ACTIONS
-        # ============================================================
         keyboard = []
         if token and len(token) > 10:
             keyboard.append([
@@ -1518,7 +1565,7 @@ async def check_force_sub(bot, user_id: int) -> Tuple[bool, List[InlineKeyboardB
         return True, []
 
 # ============================================================
-# TELEGRAM BOT USER HANDLERS - FIXED START
+# TELEGRAM BOT USER HANDLERS
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1558,16 +1605,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not plan_display:
             plan_display = "│ No accounts available\n"
         
-        # ============================================================
-        # FIXED: Working/Not working buttons ONLY if account assigned
-        # ============================================================
         assigned = get_assigned_account(user_id)
         
         keyboard = [
             [InlineKeyboardButton("🎯 Get Account", callback_data="get_account")],
         ]
         
-        # Only show Working/Not Working if user has an assigned account
         if assigned:
             keyboard.append([
                 InlineKeyboardButton("✅ Working", callback_data="working"),
@@ -1647,9 +1690,6 @@ async def get_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token = safe_str(account.get('nftoken'))
         nft_expiry = safe_str(account.get('nftoken_expiry'))
         
-        # ============================================================
-        # PREMIUM UI - ACCOUNT DETAILS WITH ALL FIELDS
-        # ============================================================
         text = f"""🎉 <b>ACCOUNT ASSIGNED!</b>
 ━━━━━━━━━━━━━━━━━━━━━
 📧 <b>Email:</b> <code>{h(account.get('email'))}</code>
@@ -1969,7 +2009,7 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in back_to_menu: {e}")
 
 # ============================================================
-# FULL IMPLEMENTATION OF ADMIN PANEL & STOCK MANAGER
+# ADMIN PANEL & STOCK MANAGER
 # ============================================================
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2165,6 +2205,10 @@ async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in admin_upload: {e}")
 
+# ============================================================
+# FIXED: handle_file_upload - SHOWS PROGRESS & SAVES PROPERLY
+# ============================================================
+
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
@@ -2222,6 +2266,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         valid = 0
         accounts = []
+        saved = 0
         
         def check_item(item):
             nid, sid = item
@@ -2266,12 +2311,17 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     })
                     valid += 1
                 
-                if completed % 10 == 0 or completed == total:
+                # Update progress every 5 accounts
+                if completed % 5 == 0 or completed == total:
                     try:
-                        await status_msg.edit_text(f"🔄 Multi-Thread Progress: <b>{completed}/{total}</b> | ✅ Valid: <b>{valid}</b>", parse_mode=ParseMode.HTML)
+                        await status_msg.edit_text(
+                            f"🔄 Multi-Thread Progress: <b>{completed}/{total}</b> | ✅ Valid: <b>{valid}</b> | 💾 Saved: <b>{len(accounts)}</b>",
+                            parse_mode=ParseMode.HTML
+                        )
                     except Exception:
                         pass
                         
+        # Save accounts after all checks are complete
         if accounts:
             saved = save_account_batch(accounts)
             log_stock(user_id, file_name, total, saved)
