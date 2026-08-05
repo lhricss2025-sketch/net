@@ -671,29 +671,29 @@ def can_get_account(user_id: int) -> Tuple[bool, str]:
     return True, ""
 
 # ============================================================
-# FIXED: save_account_batch - PROPER DATABASE SAVE
+# FIXED: save_account_batch - WORKS ON BOTH SQLITE & TURSO
 # ============================================================
 def save_account_batch(accounts: List[Dict]) -> int:
-    """Save accounts to database with proper row count tracking."""
+    """Save accounts to database - works for BOTH SQLite and Turso."""
     if not accounts:
         return 0
     
-    try:
-        # Ensure database connection is active
-        db.execute("SELECT 1")
-        
-        query = '''
-            INSERT INTO accounts (
-                email, country, plan, cookies, nftoken, nftoken_expiry,
-                source_file, last_checked, account_name, streams, quality,
-                price, billing_date, member_since, payment_method, card_last4,
-                phone, extra_member, membership_status, email_verified,
-                profiles, user_guid
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        '''
-        
-        params_list = [
-            (
+    saved = 0
+    db_type = "Turso" if db.use_turso else "SQLite"
+    logger.info(f"💾 Saving {len(accounts)} accounts to {db_type}...")
+    
+    for a in accounts:
+        try:
+            # Simple INSERT - works for both SQLite AND Turso
+            cur = db.execute('''
+                INSERT INTO accounts (
+                    email, country, plan, cookies, nftoken, nftoken_expiry,
+                    source_file, last_checked, account_name, streams, quality,
+                    price, billing_date, member_since, payment_method, card_last4,
+                    phone, extra_member, membership_status, email_verified,
+                    profiles, user_guid
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
                 safe_str(a.get("email")),
                 safe_str(a.get("country")),
                 safe_str(a.get("plan")),
@@ -715,51 +715,15 @@ def save_account_batch(accounts: List[Dict]) -> int:
                 1 if safe_bool(a.get("email_verified")) else 0,
                 safe_str(a.get("profiles")),
                 safe_str(a.get("user_guid")),
-            )
-            for a in accounts
-        ]
-        
-        cur = db.executemany(query, params_list)
-        db.commit()
-        saved = cur.rowcount
-        
-        logger.info(f"✅ Successfully saved {saved} accounts to database")
-        return saved
-        
-    except Exception as e:
-        logger.error(f"❌ Error in save_account_batch: {e}")
-        # Try one by one if batch fails
-        saved = 0
-        for a in accounts:
-            try:
-                query = '''
-                    INSERT INTO accounts (
-                        email, country, plan, cookies, nftoken, nftoken_expiry,
-                        source_file, last_checked, account_name, streams, quality,
-                        price, billing_date, member_since, payment_method, card_last4,
-                        phone, extra_member, membership_status, email_verified,
-                        profiles, user_guid
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                '''
-                params = (
-                    safe_str(a.get("email")), safe_str(a.get("country")), safe_str(a.get("plan")),
-                    safe_str(a.get("cookies")), safe_str(a.get("nftoken")), safe_str(a.get("nftoken_expiry")),
-                    safe_str(a.get("source_file")), safe_str(a.get("account_name")), safe_int(a.get("streams")),
-                    safe_str(a.get("quality")), safe_str(a.get("price")), safe_str(a.get("billing_date")),
-                    safe_str(a.get("member_since")), safe_str(a.get("payment_method")), safe_str(a.get("card_last4")),
-                    safe_str(a.get("phone")), 1 if safe_bool(a.get("extra_member")) else 0,
-                    safe_str(a.get("membership_status")), 1 if safe_bool(a.get("email_verified")) else 0,
-                    safe_str(a.get("profiles")), safe_str(a.get("user_guid")),
-                )
-                cur = db.execute(query, params)
-                db.commit()
-                if cur.rowcount > 0:
-                    saved += 1
-            except Exception as e2:
-                logger.error(f"❌ Failed to save account {a.get('email')}: {e2}")
-        
-        logger.info(f"✅ Saved {saved} accounts one by one")
-        return saved
+            ))
+            db.commit()
+            if cur.rowcount > 0:
+                saved += 1
+        except Exception as e:
+            logger.error(f"❌ Failed to save account {a.get('email')}: {e}")
+    
+    logger.info(f"✅ Successfully saved {saved}/{len(accounts)} accounts to {db_type}")
+    return saved
 
 def log_stock(admin_id: int, file_name: str, total: int, valid: int):
     try:
