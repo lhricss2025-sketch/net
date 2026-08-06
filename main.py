@@ -592,7 +592,7 @@ class NetflixService:
         return None, None
     
     @staticmethod
-def check_account(cookies_dict: Dict) -> Dict:
+    def check_account(cookies_dict: Dict) -> Dict:
     """Fast and accurate Netflix account checker with multi-thread support."""
     if not cookies_dict or "NetflixId" not in cookies_dict:
         return {"valid": False, "error": "Missing NetflixId"}
