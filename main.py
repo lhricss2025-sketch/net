@@ -592,144 +592,144 @@ class NetflixService:
                     session.cookies.set(name, value, domain=".netflix.com", path="/", secure=True)
                 else:
                     session.cookies.set(name, value, domain=".netflix.com", path="/")
+    
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Connection": "keep-alive",
+                    "Upgrade-Insecure-Requests": "1",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
+                    "Cache-Control": "max-age=0",
+                }
             
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Cache-Control": "max-age=0",
-            }
+                urls = [
+                    "https://www.netflix.com/account/membership",
+                    "https://www.netflix.com/YourAccount",
+                    "https://www.netflix.com/browse"
+                ]
             
-            urls = [
-                "https://www.netflix.com/account/membership",
-                "https://www.netflix.com/YourAccount",
-                "https://www.netflix.com/browse"
-            ]
+                last_error = None
             
-            last_error = None
-            
-            for attempt in range(MAX_RETRIES):
-                for url in urls:
-                    try:
-                        response = session.get(
-                            url,
-                            headers=headers,
-                            timeout=CHECK_TIMEOUT,
-                            verify=False,
-                            allow_redirects=True
-                        )
+                for attempt in range(MAX_RETRIES):
+                    for url in urls:
+                        try:
+                            response = session.get(
+                                url,
+                                headers=headers,
+                                timeout=CHECK_TIMEOUT,
+                                verify=False,
+                                allow_redirects=True
+                            )
                         
-                        if response.status_code == 200:
-                            if "login" in response.url.lower() or "signin" in response.url.lower():
+                            if response.status_code == 200:
+                                if "login" in response.url.lower() or "signin" in response.url.lower():
+                                    continue
+                            
+                                text = response.text
+                            
+                                if any(keyword in text.lower() for keyword in ["netflix", "account", "membership", "profile", "browse"]):
+                                    info = NetflixService.parse_account_page(text)
+                                    is_subscribed = NetflixService.is_subscribed(info)
+                                
+                                    nftoken = None
+                                    nftoken_expiry = None
+                                    if cookies_dict.get("NetflixId"):
+                                        nftoken, nftoken_expiry = NetflixService.generate_nftoken(cookies_dict.get("NetflixId"))
+                                
+                                    plan_key, plan_label = NetflixService.derive_plan(info, is_subscribed)
+                                    on_hold = NetflixService.is_on_hold(info)
+                                
+                                    return {
+                                        "valid": True,
+                                        "subscribed": is_subscribed,
+                                        "on_hold": on_hold,
+                                        "info": info,
+                                        "plan_key": plan_key,
+                                        "plan_label": plan_label,
+                                        "nftoken": nftoken,
+                                        "nftoken_expiry": nftoken_expiry,
+                                    }
+                            elif response.status_code == 403:
+                                continue
+                            elif response.status_code == 429:
+                                time.sleep(1)
                                 continue
                             
-                            text = response.text
-                            
-                            if any(keyword in text.lower() for keyword in ["netflix", "account", "membership", "profile", "browse"]):
-                                info = NetflixService.parse_account_page(text)
-                                is_subscribed = NetflixService.is_subscribed(info)
-                                
-                                nftoken = None
-                                nftoken_expiry = None
-                                if cookies_dict.get("NetflixId"):
-                                    nftoken, nftoken_expiry = NetflixService.generate_nftoken(cookies_dict.get("NetflixId"))
-                                
-                                plan_key, plan_label = NetflixService.derive_plan(info, is_subscribed)
-                                on_hold = NetflixService.is_on_hold(info)
-                                
-                                return {
-                                    "valid": True,
-                                    "subscribed": is_subscribed,
-                                    "on_hold": on_hold,
-                                    "info": info,
-                                    "plan_key": plan_key,
-                                    "plan_label": plan_label,
-                                    "nftoken": nftoken,
-                                    "nftoken_expiry": nftoken_expiry,
-                                }
-                        elif response.status_code == 403:
+                        except requests.exceptions.Timeout:
+                            last_error = "Timeout"
                             continue
-                        elif response.status_code == 429:
-                            time.sleep(1)
+                        except requests.exceptions.ConnectionError:
+                            last_error = "Connection Error"
                             continue
-                            
-                    except requests.exceptions.Timeout:
-                        last_error = "Timeout"
-                        continue
-                    except requests.exceptions.ConnectionError:
-                        last_error = "Connection Error"
-                        continue
-                    except Exception as e:
-                        last_error = str(e)
-                        continue
+                        except Exception as e:
+                            last_error = str(e)
+                            continue
                 
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(0.5)
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(0.5)
             
-            return {"valid": False, "error": last_error or "Could not validate account"}
+                return {"valid": False, "error": last_error or "Could not validate account"}
             
-        except Exception as e:
-            logger.error(f"check_account error: {e}")
-            return {"valid": False, "error": str(e)}
-        finally:
-            if session:
-                try:
-                    session.close()
-                except:
-                    pass
+            except Exception as e:
+                logger.error(f"check_account error: {e}")
+                return {"valid": False, "error": str(e)}
+            finally:
+                if session:
+                    try:
+                        session.close()
+                    except:
+                        pass
 
 # ============================================================
 # DUPLICATE TRACKER
 # ============================================================
 class DuplicateTracker:
-    def __init__(self):
-        self.processed = set()
-        self.lock = threading.Lock()
+        def __init__(self):
+            self.processed = set()
+            self.lock = threading.Lock()
     
-    def is_duplicate(self, email: str) -> bool:
-        if not email:
-            return False
-        with self.lock:
-            if email in self.processed:
-                return True
-            self.processed.add(email)
-            return False
+        def is_duplicate(self, email: str) -> bool:
+            if not email:
+                return False
+            with self.lock:
+                if email in self.processed:
+                    return True
+                self.processed.add(email)
+                return False
     
-    def reset(self):
-        with self.lock:
-            self.processed.clear()
+        def reset(self):
+            with self.lock:
+                self.processed.clear()
 
 # ============================================================
 # DATABASE MANAGER
 # ============================================================
 class DatabaseManager:
-    _instance = None
-    _lock = threading.Lock()
+        _instance = None
+        _lock = threading.Lock()
     
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._initialize()
-        return cls._instance
+        def __new__(cls):
+            if cls._instance is None:
+                with cls._lock:
+                    if cls._instance is None:
+                        cls._instance = super().__new__(cls)
+                        cls._instance._initialize()
+            return cls._instance
     
-    def _initialize(self):
-        self.turso_conn = None
-        self.sqlite_conn = None
-        self.use_turso = False
-        self._turso_lock = threading.Lock()
-        self._sqlite_lock = threading.Lock()
+        def _initialize(self):
+            self.turso_conn = None
+            self.sqlite_conn = None
+            self.use_turso = False
+            self._turso_lock = threading.Lock()
+            self._sqlite_lock = threading.Lock()
         
-        self._connect_turso()
-        self._connect_sqlite()
+            self._connect_turso()
+            self._connect_sqlite()
     
     @retry_on_failure(max_retries=3, delay=2.0)
     def _connect_turso(self):
