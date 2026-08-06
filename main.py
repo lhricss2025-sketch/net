@@ -592,44 +592,66 @@ class NetflixService:
         return None, None
     
     @staticmethod
-    def check_account(cookies_dict: Dict) -> Dict:
-        if not cookies_dict or "NetflixId" not in cookies_dict:
-            return {"valid": False, "error": "Missing NetflixId"}
+def check_account(cookies_dict: Dict) -> Dict:
+    """Fast and accurate Netflix account checker with multi-thread support."""
+    if not cookies_dict or "NetflixId" not in cookies_dict:
+        return {"valid": False, "error": "Missing NetflixId"}
+    
+    session = None
+    try:
+        session = requests.Session()
         
-        try:
-            session = requests.Session()
-            for name, value in cookies_dict.items():
+        # Set cookies properly
+        for name, value in cookies_dict.items():
+            if name == "NetflixId":
                 session.cookies.set(name, value, domain=".netflix.com", path="/")
-            
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "identity",
-            }
-            
-            urls = [
-                "https://www.netflix.com/account/membership",
-                "https://www.netflix.com/YourAccount",
-                "https://www.netflix.com/browse"
-            ]
-            
-            for attempt in range(MAX_RETRIES):
-                for url in urls:
-                    try:
-                        response = session.get(
-                            url,
-                            headers=headers,
-                            timeout=CHECK_TIMEOUT,
-                            verify=False,
-                            allow_redirects=True
-                        )
+            elif name == "SecureNetflixId":
+                session.cookies.set(name, value, domain=".netflix.com", path="/", secure=True)
+            else:
+                session.cookies.set(name, value, domain=".netflix.com", path="/")
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+        }
+        
+        # Multiple endpoints for better success rate
+        urls = [
+            "https://www.netflix.com/account/membership",
+            "https://www.netflix.com/YourAccount",
+            "https://www.netflix.com/browse"
+        ]
+        
+        last_error = None
+        
+        for attempt in range(MAX_RETRIES):
+            for url in urls:
+                try:
+                    response = session.get(
+                        url,
+                        headers=headers,
+                        timeout=CHECK_TIMEOUT,
+                        verify=False,
+                        allow_redirects=True
+                    )
+                    
+                    if response.status_code == 200:
+                        if "login" in response.url.lower() or "signin" in response.url.lower():
+                            continue
                         
-                        if response.status_code == 200:
-                            if "login" in response.url.lower() or "signin" in response.url.lower():
-                                continue
-                            
-                            text = response.text
+                        text = response.text
+                        
+                        # Quick validation
+                        if any(keyword in text.lower() for keyword in ["netflix", "account", "membership", "profile", "browse"]):
                             info = NetflixService.parse_account_page(text)
                             is_subscribed = NetflixService.is_subscribed(info)
                             
@@ -651,16 +673,36 @@ class NetflixService:
                                 "nftoken": nftoken,
                                 "nftoken_expiry": nftoken_expiry,
                             }
-                    except:
+                    elif response.status_code == 403:
                         continue
-                
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(1)
+                    elif response.status_code == 429:
+                        time.sleep(1)
+                        continue
+                        
+                except requests.exceptions.Timeout:
+                    last_error = "Timeout"
+                    continue
+                except requests.exceptions.ConnectionError:
+                    last_error = "Connection Error"
+                    continue
+                except Exception as e:
+                    last_error = str(e)
+                    continue
             
-            return {"valid": False, "error": "Could not validate account"}
-        except Exception as e:
-            logger.error(f"check_account error: {e}")
-            return {"valid": False, "error": str(e)}
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(0.5)
+        
+        return {"valid": False, "error": last_error or "Could not validate account"}
+        
+    except Exception as e:
+        logger.error(f"check_account error: {e}")
+        return {"valid": False, "error": str(e)}
+    finally:
+        if session:
+            try:
+                session.close()
+            except:
+                pass
 
 # ============================================================
 # DUPLICATE TRACKER
