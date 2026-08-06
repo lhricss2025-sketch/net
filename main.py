@@ -1,9 +1,7 @@
 """
-SENZO NETFLIX BOT - FINAL COMPLETE EDITION
-Version: 4.0.0
-All Features: Working ✓
-Database: Turso (Persistent) + SQLite (Temporary)
-Developer: @Senzo268
+SENZO NETFLIX BOT - PRODUCTION READY v4.0
+Author: @Senzo268
+Deployment: Railway.com Ready
 """
 
 import sys
@@ -23,13 +21,11 @@ import traceback
 import shutil
 import random
 import string
-import unicodedata
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Union
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from contextlib import contextmanager
 from functools import wraps
-from urllib.parse import quote
 from queue import Queue
 
 # ============================================================
@@ -100,6 +96,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "")
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
 REPORT_CHANNEL_ID = os.getenv("REPORT_CHANNEL_ID", "")
+PORT = int(os.getenv("PORT", 8080))
 
 ADMIN_IDS = [
     int(aid.strip()) 
@@ -152,10 +149,9 @@ def health_check():
     }), 200
 
 def start_health_server():
-    port = int(os.getenv("PORT", 8080))
     try:
         logging.getLogger('werkzeug').setLevel(logging.ERROR)
-        flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+        flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
     except Exception as e:
         logger.error(f"Health server error: {e}")
 
@@ -262,14 +258,9 @@ def retry_on_failure(max_retries: int = 3, delay: float = 1.0):
 # ADVANCED COOKIE EXTRACTION
 # ============================================================
 class CookieExtractor:
-    """Advanced cookie extraction with multiple formats."""
-    
     @staticmethod
     def extract_bundles(content: str) -> List[Dict]:
-        """Extract multiple cookie bundles from content."""
         bundles = []
-        
-        # Try JSON format
         try:
             data = json.loads(content)
             if isinstance(data, dict):
@@ -281,18 +272,15 @@ class CookieExtractor:
         except:
             pass
         
-        # Try Netscape format
         bundles = CookieExtractor._extract_netscape_bundles(content)
         if bundles:
             return bundles
         
-        # Try raw regex extraction
         bundles = CookieExtractor._extract_raw_bundles(content)
         return bundles
     
     @staticmethod
     def _build_bundles_from_json(cookies: List[Dict]) -> List[Dict]:
-        """Build cookie bundles from JSON cookies."""
         bundles = []
         netflix_ids = []
         secure_ids = []
@@ -323,7 +311,6 @@ class CookieExtractor:
     
     @staticmethod
     def _extract_netscape_bundles(content: str) -> List[Dict]:
-        """Extract bundles from Netscape format."""
         bundles = []
         entries = []
         
@@ -361,7 +348,6 @@ class CookieExtractor:
     
     @staticmethod
     def _extract_raw_bundles(content: str) -> List[Dict]:
-        """Extract bundles using regex patterns."""
         bundles = []
         
         netflix_pattern = re.compile(r'NetflixId[=:]\s*([^\s;\r\n"\']+)', re.IGNORECASE)
@@ -390,8 +376,6 @@ class CookieExtractor:
 # ENHANCED NETFLIX SERVICE
 # ============================================================
 class NetflixService:
-    """Enhanced Netflix service with GraphQL parsing and advanced features."""
-    
     NFTOKEN_API_URL = "https://ios.prod.ftl.netflix.com/iosui/user/15.48"
     
     PLAN_ALIASES = {
@@ -596,12 +580,11 @@ class NetflixService:
         """Fast and accurate Netflix account checker with multi-thread support."""
         if not cookies_dict or "NetflixId" not in cookies_dict:
             return {"valid": False, "error": "Missing NetflixId"}
-    
+        
         session = None
         try:
             session = requests.Session()
-        
-            # Set cookies properly
+            
             for name, value in cookies_dict.items():
                 if name == "NetflixId":
                     session.cookies.set(name, value, domain=".netflix.com", path="/")
@@ -609,7 +592,7 @@ class NetflixService:
                     session.cookies.set(name, value, domain=".netflix.com", path="/", secure=True)
                 else:
                     session.cookies.set(name, value, domain=".netflix.com", path="/")
-        
+            
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -623,16 +606,15 @@ class NetflixService:
                 "Sec-Fetch-User": "?1",
                 "Cache-Control": "max-age=0",
             }
-        
-            # Multiple endpoints for better success rate
+            
             urls = [
                 "https://www.netflix.com/account/membership",
                 "https://www.netflix.com/YourAccount",
                 "https://www.netflix.com/browse"
             ]
-        
+            
             last_error = None
-        
+            
             for attempt in range(MAX_RETRIES):
                 for url in urls:
                     try:
@@ -643,26 +625,25 @@ class NetflixService:
                             verify=False,
                             allow_redirects=True
                         )
-                    
+                        
                         if response.status_code == 200:
                             if "login" in response.url.lower() or "signin" in response.url.lower():
                                 continue
-                        
+                            
                             text = response.text
-                        
-                            # Quick validation
+                            
                             if any(keyword in text.lower() for keyword in ["netflix", "account", "membership", "profile", "browse"]):
                                 info = NetflixService.parse_account_page(text)
                                 is_subscribed = NetflixService.is_subscribed(info)
-                            
+                                
                                 nftoken = None
                                 nftoken_expiry = None
                                 if cookies_dict.get("NetflixId"):
                                     nftoken, nftoken_expiry = NetflixService.generate_nftoken(cookies_dict.get("NetflixId"))
-                            
+                                
                                 plan_key, plan_label = NetflixService.derive_plan(info, is_subscribed)
                                 on_hold = NetflixService.is_on_hold(info)
-                            
+                                
                                 return {
                                     "valid": True,
                                     "subscribed": is_subscribed,
@@ -678,7 +659,7 @@ class NetflixService:
                         elif response.status_code == 429:
                             time.sleep(1)
                             continue
-                        
+                            
                     except requests.exceptions.Timeout:
                         last_error = "Timeout"
                         continue
@@ -688,12 +669,12 @@ class NetflixService:
                     except Exception as e:
                         last_error = str(e)
                         continue
-            
+                
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(0.5)
-        
+            
             return {"valid": False, "error": last_error or "Could not validate account"}
-        
+            
         except Exception as e:
             logger.error(f"check_account error: {e}")
             return {"valid": False, "error": str(e)}
@@ -708,47 +689,47 @@ class NetflixService:
 # DUPLICATE TRACKER
 # ============================================================
 class DuplicateTracker:
-        def __init__(self):
-            self.processed = set()
-            self.lock = threading.Lock()
+    def __init__(self):
+        self.processed = set()
+        self.lock = threading.Lock()
     
-        def is_duplicate(self, email: str) -> bool:
-            if not email:
-                return False
-            with self.lock:
-                if email in self.processed:
-                    return True
-                self.processed.add(email)
-                return False
+    def is_duplicate(self, email: str) -> bool:
+        if not email:
+            return False
+        with self.lock:
+            if email in self.processed:
+                return True
+            self.processed.add(email)
+            return False
     
-        def reset(self):
-            with self.lock:
-                self.processed.clear()
+    def reset(self):
+        with self.lock:
+            self.processed.clear()
 
 # ============================================================
 # DATABASE MANAGER
 # ============================================================
 class DatabaseManager:
-        _instance = None
-        _lock = threading.Lock()
+    _instance = None
+    _lock = threading.Lock()
     
-        def __new__(cls):
-            if cls._instance is None:
-                with cls._lock:
-                    if cls._instance is None:
-                        cls._instance = super().__new__(cls)
-                        cls._instance._initialize()
-            return cls._instance
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialize()
+        return cls._instance
     
-        def _initialize(self):
-            self.turso_conn = None
-            self.sqlite_conn = None
-            self.use_turso = False
-            self._turso_lock = threading.Lock()
-            self._sqlite_lock = threading.Lock()
+    def _initialize(self):
+        self.turso_conn = None
+        self.sqlite_conn = None
+        self.use_turso = False
+        self._turso_lock = threading.Lock()
+        self._sqlite_lock = threading.Lock()
         
-            self._connect_turso()
-            self._connect_sqlite()
+        self._connect_turso()
+        self._connect_sqlite()
     
     @retry_on_failure(max_retries=3, delay=2.0)
     def _connect_turso(self):
@@ -1495,7 +1476,7 @@ class StatsRepository:
         return {"hits": 0, "free": 0, "bad": 0}
 
 # ============================================================
-# BOT HANDLERS
+# BOT HANDLERS (COMPLETE)
 # ============================================================
 class BotHandlers:
     def __init__(self):
@@ -1564,10 +1545,6 @@ class BotHandlers:
         if user.accounts_used >= MAX_ACCOUNTS_PER_USER and not is_admin(user.user_id):
             return False, f"⚠️ Account limit reached! Max {MAX_ACCOUNTS_PER_USER} accounts."
         return True, ""
-    
-    # ============================================================
-    # USER HANDLERS
-    # ============================================================
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
@@ -1783,7 +1760,6 @@ class BotHandlers:
                 update,
                 "✅ <b>Report Type: WORKING</b>\n\n"
                 "📸 <b>Please upload a screenshot proof now!</b>\n\n"
-                "⚠️ Send an image of the logged in account or stream playing.\n\n"
                 "👨‍💻 <b>Developer:</b> @Senzo268"
             )
         except Exception as e:
@@ -1825,7 +1801,6 @@ class BotHandlers:
                 update,
                 "❌ <b>Report Type: NOT WORKING</b>\n\n"
                 "📸 <b>Please upload a screenshot proof now!</b>\n\n"
-                "⚠️ Send an image showing the login or playback error.\n\n"
                 "👨‍💻 <b>Developer:</b> @Senzo268"
             )
         except Exception as e:
@@ -1965,10 +1940,6 @@ class BotHandlers:
             await self._send_message(update, text, reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception as e:
             logger.error(f"stats_command error: {e}")
-    
-    # ============================================================
-    # ADMIN HANDLERS
-    # ============================================================
     
     async def admin_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
@@ -3137,7 +3108,7 @@ Username: @{html_escape(user.username)}
 # ============================================================
 def main():
     print("=" * 70)
-    print("🎬 SENZO NETFLIX BOT - ULTIMATE EDITION v4.0")
+    print("🎬 SENZO NETFLIX BOT - PRODUCTION READY v4.0")
     print("=" * 70)
     print(f"🗄️ Database: Turso (Persistent) + SQLite (Accounts)")
     print(f"👤 Admins: {ADMIN_IDS}")
