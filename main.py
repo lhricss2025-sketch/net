@@ -78,7 +78,9 @@ def health_check():
     return jsonify({
         "status": "online",
         "service": "Senzo Netflix Bot",
-        "database": "Turso" if db.use_turso else "SQLite",
+        "database": "Turso + SQLite (Dual)",
+        "accounts_db": "SQLite (temp)",
+        "persistent_db": "Turso",
         "developer": "@Senzo268",
         "timestamp": datetime.utcnow().isoformat()
     }), 200
@@ -119,7 +121,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# DATABASE MANAGEMENT (THREAD-SAFE)
+# DATABASE MANAGEMENT (DUAL: TURSO + SQLITE)
 # ============================================================
 class Database:
     _instance = None
@@ -134,198 +136,222 @@ class Database:
         return cls._instance
     
     def _initialize(self):
+        self.turso_conn = None
+        self.sqlite_conn = None
         self.use_turso = False
-        self.conn = None
-        self.db_lock = threading.Lock()
         self.db_type = "SQLite"
         
+        # --- Turso for persistent data ---
         if HAS_LIBSQL and TURSO_DATABASE_URL and TURSO_DATABASE_URL.startswith("libsql://"):
             try:
                 print(f"🔄 Connecting to Turso: {TURSO_DATABASE_URL}")
                 if TURSO_AUTH_TOKEN:
-                    self.conn = libsql.connect(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
+                    self.turso_conn = libsql.connect(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
                 else:
-                    self.conn = libsql.connect(TURSO_DATABASE_URL)
+                    self.turso_conn = libsql.connect(TURSO_DATABASE_URL)
                 self.use_turso = True
                 self.db_type = "Turso"
                 print("✅ Turso connection successful!")
-                self._init_tables()
-                return
+                self._init_turso_tables()
             except Exception as e:
                 print(f"⚠️ Turso connection failed: {e}")
                 self.use_turso = False
                 self.db_type = "SQLite"
         
+        # --- SQLite for accounts (cookies) ---
         try:
-            self.conn = sqlite3.connect("bot.db", check_same_thread=False)
-            print("✅ Using SQLite database (fallback)")
-            self._init_tables()
+            self.sqlite_conn = sqlite3.connect("bot.db", check_same_thread=False)
+            print("✅ SQLite connection for accounts established.")
+            self._init_sqlite_tables()
         except Exception as e:
-            print(f"❌ Database error: {e}")
+            print(f"❌ SQLite error: {e}")
             raise
-    
-    def _init_tables(self):
-        with self.db_lock:
-            cur = self.conn.cursor()
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    is_banned BOOLEAN DEFAULT 0,
-                    is_admin BOOLEAN DEFAULT 0,
-                    last_account_time TIMESTAMP,
-                    total_working INT DEFAULT 0,
-                    total_notworking INT DEFAULT 0,
-                    working_reports INT DEFAULT 0,
-                    notworking_reports INT DEFAULT 0,
-                    accounts_used INT DEFAULT 0,
-                    pending_report BOOLEAN DEFAULT 0,
-                    pending_report_account_id INTEGER,
-                    pending_report_type TEXT,
-                    warnings INT DEFAULT 0
-                )
-            ''')
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS accounts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    email TEXT,
-                    country TEXT,
-                    plan TEXT,
-                    cookies TEXT,
-                    nftoken TEXT,
-                    nftoken_expiry TEXT,
-                    assigned_to INTEGER,
-                    assigned_at TIMESTAMP,
-                    is_working BOOLEAN DEFAULT 1,
-                    status TEXT DEFAULT 'available',
-                    source_file TEXT,
-                    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_checked TIMESTAMP,
-                    report_count INT DEFAULT 0,
-                    account_name TEXT,
-                    streams INT,
-                    quality TEXT,
-                    price TEXT,
-                    billing_date TEXT,
-                    member_since TEXT,
-                    payment_method TEXT,
-                    card_last4 TEXT,
-                    phone TEXT,
-                    extra_member BOOLEAN DEFAULT 0,
-                    membership_status TEXT,
-                    email_verified BOOLEAN DEFAULT 0,
-                    profiles TEXT,
-                    user_guid TEXT,
-                    working_confirmed BOOLEAN DEFAULT 0
-                )
-            ''')
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS reports (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    account_id INTEGER,
-                    report_type TEXT,
-                    screenshot_file_id TEXT,
-                    status TEXT DEFAULT 'pending',
-                    reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    reviewed_at TIMESTAMP,
-                    admin_note TEXT,
-                    admin_id INTEGER,
-                    channel_post_id INTEGER
-                )
-            ''')
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    message TEXT,
-                    admin_reply TEXT,
-                    status TEXT DEFAULT 'pending',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    replied_at TIMESTAMP
-                )
-            ''')
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS channels (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    channel_id TEXT UNIQUE,
-                    channel_name TEXT,
-                    invite_link TEXT,
-                    is_active BOOLEAN DEFAULT 1
-                )
-            ''')
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS stock_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    admin_id INTEGER,
-                    file_name TEXT,
-                    total_found INT,
-                    valid_found INT,
-                    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS stats (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    date DATE UNIQUE,
-                    total_hits INT DEFAULT 0,
-                    total_free INT DEFAULT 0,
-                    total_bad INT DEFAULT 0
-                )
-            ''')
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS ban_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    admin_id INTEGER,
-                    reason TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS warning_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    admin_id INTEGER,
-                    reason TEXT,
-                    warning_number INT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            self.conn.commit()
-            print("✅ Database tables initialized")
-    
-    def execute(self, query, params=None):
-        with self.db_lock:
-            cur = self.conn.cursor()
-            if params:
-                cur.execute(query, params)
-            else:
-                cur.execute(query)
-            return cur
-    
-    def executemany(self, query, params_list):
-        with self.db_lock:
-            cur = self.conn.cursor()
-            cur.executemany(query, params_list)
-            return cur
-    
-    def commit(self):
-        with self.db_lock:
-            self.conn.commit()
-    
+
+    def _init_turso_tables(self):
+        """Tables that persist across redeploys."""
+        if not self.turso_conn:
+            return
+        cur = self.turso_conn.cursor()
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_banned BOOLEAN DEFAULT 0,
+                is_admin BOOLEAN DEFAULT 0,
+                last_account_time TIMESTAMP,
+                total_working INT DEFAULT 0,
+                total_notworking INT DEFAULT 0,
+                working_reports INT DEFAULT 0,
+                notworking_reports INT DEFAULT 0,
+                accounts_used INT DEFAULT 0,
+                pending_report BOOLEAN DEFAULT 0,
+                pending_report_account_id INTEGER,
+                pending_report_type TEXT,
+                warnings INT DEFAULT 0
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                account_id INTEGER,
+                report_type TEXT,
+                screenshot_file_id TEXT,
+                status TEXT DEFAULT 'pending',
+                reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                reviewed_at TIMESTAMP,
+                admin_note TEXT,
+                admin_id INTEGER,
+                channel_post_id INTEGER
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                message TEXT,
+                admin_reply TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                replied_at TIMESTAMP
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id TEXT UNIQUE,
+                channel_name TEXT,
+                invite_link TEXT,
+                is_active BOOLEAN DEFAULT 1
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS stock_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id INTEGER,
+                file_name TEXT,
+                total_found INT,
+                valid_found INT,
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date DATE UNIQUE,
+                total_hits INT DEFAULT 0,
+                total_free INT DEFAULT 0,
+                total_bad INT DEFAULT 0
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS ban_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                admin_id INTEGER,
+                reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS warning_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                admin_id INTEGER,
+                reason TEXT,
+                warning_number INT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        self.turso_conn.commit()
+        print("✅ Turso persistent tables initialized")
+
+    def _init_sqlite_tables(self):
+        """SQLite only for accounts (cookies) - wiped on redeploy."""
+        if not self.sqlite_conn:
+            return
+        cur = self.sqlite_conn.cursor()
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT,
+                country TEXT,
+                plan TEXT,
+                cookies TEXT,
+                nftoken TEXT,
+                nftoken_expiry TEXT,
+                assigned_to INTEGER,
+                assigned_at TIMESTAMP,
+                is_working BOOLEAN DEFAULT 1,
+                status TEXT DEFAULT 'available',
+                source_file TEXT,
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_checked TIMESTAMP,
+                report_count INT DEFAULT 0,
+                account_name TEXT,
+                streams INT,
+                quality TEXT,
+                price TEXT,
+                billing_date TEXT,
+                member_since TEXT,
+                payment_method TEXT,
+                card_last4 TEXT,
+                phone TEXT,
+                extra_member BOOLEAN DEFAULT 0,
+                membership_status TEXT,
+                email_verified BOOLEAN DEFAULT 0,
+                profiles TEXT,
+                user_guid TEXT,
+                working_confirmed BOOLEAN DEFAULT 0
+            )
+        ''')
+        self.sqlite_conn.commit()
+        print("✅ SQLite accounts table initialized")
+
+    def execute_turso(self, query, params=None):
+        """Execute on Turso connection (persistent data)."""
+        if not self.turso_conn:
+            raise Exception("Turso connection not available")
+        cur = self.turso_conn.cursor()
+        if params:
+            cur.execute(query, params)
+        else:
+            cur.execute(query)
+        return cur
+
+    def execute_sqlite(self, query, params=None):
+        """Execute on SQLite connection (accounts)."""
+        if not self.sqlite_conn:
+            raise Exception("SQLite connection not available")
+        cur = self.sqlite_conn.cursor()
+        if params:
+            cur.execute(query, params)
+        else:
+            cur.execute(query)
+        return cur
+
+    def commit_turso(self):
+        if self.turso_conn:
+            self.turso_conn.commit()
+
+    def commit_sqlite(self):
+        if self.sqlite_conn:
+            self.sqlite_conn.commit()
+
     def close(self):
-        with self.db_lock:
-            self.conn.close()
+        if self.turso_conn:
+            self.turso_conn.close()
+        if self.sqlite_conn:
+            self.sqlite_conn.close()
 
 db = Database()
 
@@ -463,12 +489,12 @@ def generate_nftoken(netflix_id: str, attempts: int = 3):
     return None, None
 
 # ============================================================
-# DATABASE HELPERS
+# DATABASE HELPERS - TURSO (Persistent)
 # ============================================================
 
 def get_user(user_id: int) -> Dict:
     try:
-        cur = db.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+        cur = db.execute_turso('SELECT * FROM users WHERE user_id = ?', (user_id,))
         row = cur.fetchone()
         if row:
             return {
@@ -496,7 +522,7 @@ def find_user_by_query(query_str: str) -> Optional[Dict]:
         q = query_str.strip().lstrip('@')
         if q.isdigit():
             return get_user(int(q))
-        cur = db.execute('SELECT user_id FROM users WHERE LOWER(username) = LOWER(?)', (q,))
+        cur = db.execute_turso('SELECT user_id FROM users WHERE LOWER(username) = LOWER(?)', (q,))
         row = cur.fetchone()
         if row:
             return get_user(row[0])
@@ -507,17 +533,17 @@ def find_user_by_query(query_str: str) -> Optional[Dict]:
 def create_user(user_id: int, username: str, first_name: str):
     try:
         is_admin = 1 if user_id in ADMIN_IDS else 0
-        db.execute('''
+        db.execute_turso('''
             INSERT OR IGNORE INTO users (user_id, username, first_name, is_admin, pending_report, warnings)
             VALUES (?, ?, ?, ?, 0, 0)
         ''', (user_id, safe_str(username), safe_str(first_name), is_admin))
-        db.commit()
+        db.commit_turso()
     except Exception as e:
         logger.error(f"Error in create_user: {e}")
 
 def get_all_users() -> List[Dict]:
     try:
-        cur = db.execute('SELECT user_id, username, first_name, is_banned, warnings, accounts_used FROM users ORDER BY joined_at DESC')
+        cur = db.execute_turso('SELECT user_id, username, first_name, is_banned, warnings, accounts_used FROM users ORDER BY joined_at DESC')
         rows = cur.fetchall()
         return [
             {
@@ -530,17 +556,148 @@ def get_all_users() -> List[Dict]:
         logger.error(f"Error in get_all_users: {e}")
         return []
 
+def get_banned_users() -> List[Tuple]:
+    try:
+        cur = db.execute_turso('SELECT user_id, username, first_name FROM users WHERE is_banned = 1')
+        return cur.fetchall()
+    except Exception as e:
+        logger.error(f"Error in get_banned_users: {e}")
+        return []
+
+def get_pending_reports() -> List[Dict]:
+    try:
+        cur = db.execute_turso('''
+            SELECT r.id, r.user_id, r.account_id, r.report_type, r.screenshot_file_id, r.reported_at, u.username, a.email
+            FROM reports r
+            LEFT JOIN users u ON r.user_id = u.user_id
+            LEFT JOIN accounts a ON r.account_id = a.id
+            WHERE r.status = 'pending' ORDER BY r.id DESC
+        ''')
+        rows = cur.fetchall()
+        return [
+            {
+                "id": r[0], "user_id": r[1], "account_id": r[2], "report_type": safe_str(r[3]),
+                "screenshot": safe_str(r[4]), "time": safe_str(r[5]), "username": safe_str(r[6]), "email": safe_str(r[7])
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        logger.error(f"Error in get_pending_reports: {e}")
+        return []
+
+def get_stock_logs_history() -> List[Dict]:
+    try:
+        cur = db.execute_turso('SELECT id, admin_id, file_name, total_found, valid_found, uploaded_at FROM stock_logs ORDER BY id DESC LIMIT 15')
+        rows = cur.fetchall()
+        return [
+            {
+                "id": r[0], "admin_id": r[1], "file_name": safe_str(r[2]),
+                "total": safe_int(r[3]), "valid": safe_int(r[4]), "time": safe_str(r[5])
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        logger.error(f"Error in get_stock_logs_history: {e}")
+        return []
+
+def log_stock(admin_id: int, file_name: str, total: int, valid: int):
+    try:
+        db.execute_turso('INSERT INTO stock_logs (admin_id, file_name, total_found, valid_found) VALUES (?, ?, ?, ?)',
+                   (admin_id, file_name, total, valid))
+        db.commit_turso()
+    except Exception as e:
+        logger.error(f"Error in log_stock: {e}")
+
+def log_daily_stats(hits: int = 0, free: int = 0, bad: int = 0):
+    try:
+        cur = db.execute_turso('SELECT id FROM stats WHERE date = CURRENT_DATE')
+        row = cur.fetchone()
+        if row:
+            db.execute_turso('''
+                UPDATE stats 
+                SET total_hits = total_hits + ?, total_free = total_free + ?, total_bad = total_bad + ?
+                WHERE date = CURRENT_DATE
+            ''', (hits, free, bad))
+        else:
+            db.execute_turso('''
+                INSERT INTO stats (date, total_hits, total_free, total_bad)
+                VALUES (CURRENT_DATE, ?, ?, ?)
+            ''', (hits, free, bad))
+        db.commit_turso()
+    except Exception as e:
+        logger.error(f"Error in log_daily_stats: {e}")
+
+def update_report_channel_post(report_id: int, channel_post_id: int):
+    try:
+        db.execute_turso('UPDATE reports SET channel_post_id = ? WHERE id = ?', (channel_post_id, report_id))
+        db.commit_turso()
+    except Exception as e:
+        logger.error(f"Error in update_report_channel_post: {e}")
+
+def confirm_account_working(account_id: int, report_id: int, admin_id: int) -> bool:
+    try:
+        db.execute_sqlite('UPDATE accounts SET is_working = 1, status = "available", working_confirmed = 1 WHERE id = ?', (account_id,))
+        db.commit_sqlite()
+        db.execute_turso('UPDATE reports SET status = "accepted", reviewed_at = CURRENT_TIMESTAMP, admin_id = ? WHERE id = ?', (admin_id, report_id))
+        db.commit_turso()
+        return True
+    except Exception as e:
+        logger.error(f"Error in confirm_account_working: {e}")
+        return False
+
+def add_warning(user_id: int, admin_id: int, reason: str) -> int:
+    try:
+        cur = db.execute_turso('SELECT warnings FROM users WHERE user_id = ?', (user_id,))
+        row = cur.fetchone()
+        warnings = row[0] + 1 if row else 1
+        db.execute_turso('UPDATE users SET warnings = ? WHERE user_id = ?', (warnings, user_id))
+        db.execute_turso('''
+            INSERT INTO warning_logs (user_id, admin_id, reason, warning_number)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, admin_id, reason, warnings))
+        db.commit_turso()
+        return warnings
+    except Exception as e:
+        logger.error(f"Error in add_warning: {e}")
+        return 0
+
+def ban_user_from_bot(user_id: int, admin_id: int, reason: str) -> bool:
+    try:
+        db.execute_turso('UPDATE users SET is_banned = 1 WHERE user_id = ?', (user_id,))
+        db.execute_turso('''
+            INSERT INTO ban_logs (user_id, admin_id, reason)
+            VALUES (?, ?, ?)
+        ''', (user_id, admin_id, reason))
+        db.commit_turso()
+        return True
+    except Exception as e:
+        logger.error(f"Error in ban_user_from_bot: {e}")
+        return False
+
+def unban_user_from_bot(user_id: int, admin_id: int) -> bool:
+    try:
+        db.execute_turso('UPDATE users SET is_banned = 0, warnings = 0 WHERE user_id = ?', (user_id,))
+        db.commit_turso()
+        return True
+    except Exception as e:
+        logger.error(f"Error in unban_user_from_bot: {e}")
+        return False
+
+# ============================================================
+# DATABASE HELPERS - SQLITE (Accounts/Cookies)
+# ============================================================
+
 def get_available_accounts(plan_filter: Optional[str] = None) -> List[Dict]:
     try:
         if plan_filter:
-            cur = db.execute('''
+            cur = db.execute_sqlite('''
                 SELECT id, email, country, plan, cookies, nftoken, nftoken_expiry, status,
                        account_name, streams, quality, price, billing_date, member_since,
                        payment_method, card_last4, phone, extra_member, profiles, user_guid
                 FROM accounts WHERE status = 'available' AND is_working = 1 AND UPPER(plan) = UPPER(?) ORDER BY id ASC
             ''', (plan_filter,))
         else:
-            cur = db.execute('''
+            cur = db.execute_sqlite('''
                 SELECT id, email, country, plan, cookies, nftoken, nftoken_expiry, status,
                        account_name, streams, quality, price, billing_date, member_since,
                        payment_method, card_last4, phone, extra_member, profiles, user_guid
@@ -565,9 +722,9 @@ def get_available_accounts(plan_filter: Optional[str] = None) -> List[Dict]:
 
 def get_total_accounts() -> Dict:
     try:
-        cur = db.execute('SELECT COUNT(*) FROM accounts WHERE status = "available" AND is_working = 1')
+        cur = db.execute_sqlite('SELECT COUNT(*) FROM accounts WHERE status = "available" AND is_working = 1')
         total = cur.fetchone()[0] or 0
-        cur = db.execute('SELECT plan, COUNT(*) FROM accounts WHERE status = "available" AND is_working = 1 GROUP BY plan')
+        cur = db.execute_sqlite('SELECT plan, COUNT(*) FROM accounts WHERE status = "available" AND is_working = 1 GROUP BY plan')
         plan_counts = {safe_str(r[0]): safe_int(r[1]) for r in cur.fetchall()}
         return {"total": total, "plans": plan_counts}
     except Exception as e:
@@ -580,21 +737,22 @@ def assign_account(user_id: int) -> Optional[Dict]:
         if not accounts:
             return None
         account = accounts[0]
-        db.execute('UPDATE accounts SET assigned_to = NULL, assigned_at = NULL, status = "available" WHERE assigned_to = ?', (user_id,))
-        cur = db.execute('''
+        db.execute_sqlite('UPDATE accounts SET assigned_to = NULL, assigned_at = NULL, status = "available" WHERE assigned_to = ?', (user_id,))
+        cur = db.execute_sqlite('''
             UPDATE accounts 
             SET assigned_to = ?, assigned_at = CURRENT_TIMESTAMP, status = 'assigned' 
             WHERE id = ? AND status = 'available'
         ''', (user_id, account["id"]))
         if cur.rowcount > 0:
-            db.execute('''
+            db.execute_turso('''
                 UPDATE users 
                 SET last_account_time = CURRENT_TIMESTAMP, accounts_used = accounts_used + 1
                 WHERE user_id = ?
             ''', (user_id,))
-            db.commit()
+            db.commit_turso()
+            db.commit_sqlite()
             return account
-        db.commit()
+        db.commit_sqlite()
         return None
     except Exception as e:
         logger.error(f"Error in assign_account: {e}")
@@ -602,7 +760,7 @@ def assign_account(user_id: int) -> Optional[Dict]:
 
 def get_assigned_account(user_id: int) -> Optional[Dict]:
     try:
-        cur = db.execute('''
+        cur = db.execute_sqlite('''
             SELECT id, email, country, plan, cookies, nftoken, nftoken_expiry,
                    account_name, streams, quality, price, billing_date, member_since,
                    payment_method, card_last4, phone, extra_member, profiles, user_guid
@@ -611,12 +769,12 @@ def get_assigned_account(user_id: int) -> Optional[Dict]:
         row = cur.fetchone()
         if row:
             return {
-                "id": r[0], "email": safe_str(r[1]), "country": safe_str(r[2]), "plan": safe_str(r[3]),
-                "cookies": safe_str(r[4]), "nftoken": safe_str(r[5]), "nftoken_expiry": safe_str(r[6]),
-                "account_name": safe_str(r[7]), "streams": safe_int(r[8]), "quality": safe_str(r[9]),
-                "price": safe_str(r[10]), "billing_date": safe_str(r[11]), "member_since": safe_str(r[12]),
-                "payment_method": safe_str(r[13]), "card_last4": safe_str(r[14]), "phone": safe_str(r[15]),
-                "extra_member": safe_bool(r[16]), "profiles": safe_str(r[17]), "user_guid": safe_str(r[18]),
+                "id": row[0], "email": safe_str(row[1]), "country": safe_str(row[2]), "plan": safe_str(row[3]),
+                "cookies": safe_str(row[4]), "nftoken": safe_str(row[5]), "nftoken_expiry": safe_str(row[6]),
+                "account_name": safe_str(row[7]), "streams": safe_int(row[8]), "quality": safe_str(row[9]),
+                "price": safe_str(row[10]), "billing_date": safe_str(row[11]), "member_since": safe_str(row[12]),
+                "payment_method": safe_str(row[13]), "card_last4": safe_str(row[14]), "phone": safe_str(row[15]),
+                "extra_member": safe_bool(row[16]), "profiles": safe_str(row[17]), "user_guid": safe_str(row[18]),
             }
     except Exception as e:
         logger.error(f"Error in get_assigned_account: {e}")
@@ -624,15 +782,15 @@ def get_assigned_account(user_id: int) -> Optional[Dict]:
 
 def release_account(account_id: int):
     try:
-        db.execute('UPDATE accounts SET assigned_to = NULL, assigned_at = NULL, status = "available" WHERE id = ?', (account_id,))
-        db.commit()
+        db.execute_sqlite('UPDATE accounts SET assigned_to = NULL, assigned_at = NULL, status = "available" WHERE id = ?', (account_id,))
+        db.commit_sqlite()
     except Exception as e:
         logger.error(f"Error in release_account: {e}")
 
 def delete_account(account_id: int) -> bool:
     try:
-        db.execute('DELETE FROM accounts WHERE id = ?', (account_id,))
-        db.commit()
+        db.execute_sqlite('DELETE FROM accounts WHERE id = ?', (account_id,))
+        db.commit_sqlite()
         return True
     except Exception as e:
         logger.error(f"Error in delete_account: {e}")
@@ -641,10 +799,10 @@ def delete_account(account_id: int) -> bool:
 def clear_all_accounts(plan_filter: Optional[str] = None) -> int:
     try:
         if plan_filter:
-            cur = db.execute('DELETE FROM accounts WHERE UPPER(plan) = UPPER(?)', (plan_filter,))
+            cur = db.execute_sqlite('DELETE FROM accounts WHERE UPPER(plan) = UPPER(?)', (plan_filter,))
         else:
-            cur = db.execute('DELETE FROM accounts')
-        db.commit()
+            cur = db.execute_sqlite('DELETE FROM accounts')
+        db.commit_sqlite()
         return cur.rowcount
     except Exception as e:
         logger.error(f"Error in clear_all_accounts: {e}")
@@ -673,22 +831,17 @@ def can_get_account(user_id: int) -> Tuple[bool, str]:
         
     return True, ""
 
-# ============================================================
-# FIXED: save_account_batch - WORKS ON BOTH SQLITE & TURSO
-# ============================================================
 def save_account_batch(accounts: List[Dict]) -> int:
-    """Save accounts to database - works for BOTH SQLite and Turso."""
+    """Save accounts to SQLite only."""
     if not accounts:
         return 0
     
     saved = 0
-    db_type = "Turso" if db.use_turso else "SQLite"
-    logger.info(f"💾 Saving {len(accounts)} accounts to {db_type}...")
+    logger.info(f"💾 Saving {len(accounts)} accounts to SQLite...")
     
     for a in accounts:
         try:
-            # Simple INSERT - works for both SQLite AND Turso
-            cur = db.execute('''
+            cur = db.execute_sqlite('''
                 INSERT INTO accounts (
                     email, country, plan, cookies, nftoken, nftoken_expiry,
                     source_file, last_checked, account_name, streams, quality,
@@ -719,140 +872,14 @@ def save_account_batch(accounts: List[Dict]) -> int:
                 safe_str(a.get("profiles")),
                 safe_str(a.get("user_guid")),
             ))
-            db.commit()
+            db.commit_sqlite()
             if cur.rowcount > 0:
                 saved += 1
         except Exception as e:
             logger.error(f"❌ Failed to save account {a.get('email')}: {e}")
     
-    logger.info(f"✅ Successfully saved {saved}/{len(accounts)} accounts to {db_type}")
+    logger.info(f"✅ Successfully saved {saved}/{len(accounts)} accounts to SQLite")
     return saved
-
-def log_stock(admin_id: int, file_name: str, total: int, valid: int):
-    try:
-        db.execute('INSERT INTO stock_logs (admin_id, file_name, total_found, valid_found) VALUES (?, ?, ?, ?)',
-                   (admin_id, file_name, total, valid))
-        db.commit()
-    except Exception as e:
-        logger.error(f"Error in log_stock: {e}")
-
-def log_daily_stats(hits: int = 0, free: int = 0, bad: int = 0):
-    try:
-        cur = db.execute('SELECT id FROM stats WHERE date = CURRENT_DATE')
-        row = cur.fetchone()
-        if row:
-            db.execute('''
-                UPDATE stats 
-                SET total_hits = total_hits + ?, total_free = total_free + ?, total_bad = total_bad + ?
-                WHERE date = CURRENT_DATE
-            ''', (hits, free, bad))
-        else:
-            db.execute('''
-                INSERT INTO stats (date, total_hits, total_free, total_bad)
-                VALUES (CURRENT_DATE, ?, ?, ?)
-            ''', (hits, free, bad))
-        db.commit()
-    except Exception as e:
-        logger.error(f"Error in log_daily_stats: {e}")
-
-def update_report_channel_post(report_id: int, channel_post_id: int):
-    try:
-        db.execute('UPDATE reports SET channel_post_id = ? WHERE id = ?', (channel_post_id, report_id))
-        db.commit()
-    except Exception as e:
-        logger.error(f"Error in update_report_channel_post: {e}")
-
-def confirm_account_working(account_id: int, report_id: int, admin_id: int) -> bool:
-    try:
-        db.execute('UPDATE accounts SET is_working = 1, status = "available", working_confirmed = 1 WHERE id = ?', (account_id,))
-        db.execute('UPDATE reports SET status = "accepted", reviewed_at = CURRENT_TIMESTAMP, admin_id = ? WHERE id = ?', (admin_id, report_id))
-        db.commit()
-        return True
-    except Exception as e:
-        logger.error(f"Error in confirm_account_working: {e}")
-        return False
-
-def add_warning(user_id: int, admin_id: int, reason: str) -> int:
-    try:
-        cur = db.execute('SELECT warnings FROM users WHERE user_id = ?', (user_id,))
-        row = cur.fetchone()
-        warnings = row[0] + 1 if row else 1
-        db.execute('UPDATE users SET warnings = ? WHERE user_id = ?', (warnings, user_id))
-        db.execute('''
-            INSERT INTO warning_logs (user_id, admin_id, reason, warning_number)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, admin_id, reason, warnings))
-        db.commit()
-        return warnings
-    except Exception as e:
-        logger.error(f"Error in add_warning: {e}")
-        return 0
-
-def ban_user_from_bot(user_id: int, admin_id: int, reason: str) -> bool:
-    try:
-        db.execute('UPDATE users SET is_banned = 1 WHERE user_id = ?', (user_id,))
-        db.execute('''
-            INSERT INTO ban_logs (user_id, admin_id, reason)
-            VALUES (?, ?, ?)
-        ''', (user_id, admin_id, reason))
-        db.commit()
-        return True
-    except Exception as e:
-        logger.error(f"Error in ban_user_from_bot: {e}")
-        return False
-
-def unban_user_from_bot(user_id: int, admin_id: int) -> bool:
-    try:
-        db.execute('UPDATE users SET is_banned = 0, warnings = 0 WHERE user_id = ?', (user_id,))
-        db.commit()
-        return True
-    except Exception as e:
-        logger.error(f"Error in unban_user_from_bot: {e}")
-        return False
-
-def get_banned_users() -> List[Tuple]:
-    try:
-        cur = db.execute('SELECT user_id, username, first_name FROM users WHERE is_banned = 1')
-        return cur.fetchall()
-    except Exception as e:
-        logger.error(f"Error in get_banned_users: {e}")
-        return []
-
-def get_pending_reports() -> List[Dict]:
-    try:
-        cur = db.execute('''
-            SELECT r.id, r.user_id, r.account_id, r.report_type, r.screenshot_file_id, r.reported_at, u.username, a.email
-            FROM reports r
-            LEFT JOIN users u ON r.user_id = u.user_id
-            LEFT JOIN accounts a ON r.account_id = a.id
-            WHERE r.status = 'pending' ORDER BY r.id DESC
-        ''')
-        rows = cur.fetchall()
-        return [
-            {
-                "id": r[0], "user_id": r[1], "account_id": r[2], "report_type": safe_str(r[3]),
-                "screenshot": safe_str(r[4]), "time": safe_str(r[5]), "username": safe_str(r[6]), "email": safe_str(r[7])
-            }
-            for r in rows
-        ]
-    except Exception as e:
-        logger.error(f"Error in get_pending_reports: {e}")
-        return []
-
-def get_stock_logs_history() -> List[Dict]:
-    try:
-        cur = db.execute('SELECT id, admin_id, file_name, total_found, valid_found, uploaded_at FROM stock_logs ORDER BY id DESC LIMIT 15')
-        rows = cur.fetchall()
-        return [
-            {
-                "id": r[0], "admin_id": r[1], "file_name": safe_str(r[2]),
-                "total": safe_int(r[3]), "valid": safe_int(r[4]), "time": safe_str(r[5])
-            }
-            for r in rows
-        ]
-    except Exception as e:
-        logger.error(f"Error in get_stock_logs_history: {e}")
-        return []
 
 # ============================================================
 # COOKIE EXTRACTION & CHECKING
@@ -1107,7 +1134,7 @@ async def send_working_to_channel(bot, report_id: int, user_id: int, account_id:
         user = get_user(user_id)
         account = get_assigned_account(user_id)
         if not account:
-            cur = db.execute('SELECT * FROM accounts WHERE id = ?', (account_id,))
+            cur = db.execute_sqlite('SELECT * FROM accounts WHERE id = ?', (account_id,))
             row = cur.fetchone()
             if row:
                 account = {
@@ -1215,7 +1242,7 @@ async def send_notworking_to_channel(bot, report_id: int, user_id: int, account_
         user = get_user(user_id)
         account = get_assigned_account(user_id)
         if not account:
-            cur = db.execute('SELECT * FROM accounts WHERE id = ?', (account_id,))
+            cur = db.execute_sqlite('SELECT * FROM accounts WHERE id = ?', (account_id,))
             row = cur.fetchone()
             if row:
                 account = {
@@ -1340,7 +1367,7 @@ async def confirm_working_callback(update: Update, context: ContextTypes.DEFAULT
         )
         await query.answer("✅ Account confirmed working!")
         
-        cur = db.execute('SELECT user_id FROM reports WHERE id = ?', (report_id,))
+        cur = db.execute_turso('SELECT user_id FROM reports WHERE id = ?', (report_id,))
         row = cur.fetchone()
         if row:
             try:
@@ -1375,8 +1402,8 @@ async def ban_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         ban_user_from_bot(user_id, admin_id, "False report (Not Working)")
         delete_account(account_id)
-        db.execute('UPDATE reports SET status = "accepted", reviewed_at = CURRENT_TIMESTAMP, admin_id = ? WHERE id = ?', (admin_id, report_id))
-        db.commit()
+        db.execute_turso('UPDATE reports SET status = "accepted", reviewed_at = CURRENT_TIMESTAMP, admin_id = ? WHERE id = ?', (admin_id, report_id))
+        db.commit_turso()
         
         current_caption = query.message.caption or query.message.text or ""
         await query.edit_message_caption(
@@ -1418,8 +1445,8 @@ async def warn_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         warnings = add_warning(user_id, admin_id, "False report (Not Working)")
         delete_account(account_id)
-        db.execute('UPDATE reports SET status = "accepted", reviewed_at = CURRENT_TIMESTAMP, admin_id = ? WHERE id = ?', (admin_id, report_id))
-        db.commit()
+        db.execute_turso('UPDATE reports SET status = "accepted", reviewed_at = CURRENT_TIMESTAMP, admin_id = ? WHERE id = ?', (admin_id, report_id))
+        db.commit_turso()
         
         current_caption = query.message.caption or query.message.text or ""
         if warnings >= 3:
@@ -1478,8 +1505,8 @@ async def dismiss_report_callback(update: Update, context: ContextTypes.DEFAULT_
             return
         
         delete_account(account_id)
-        db.execute('UPDATE reports SET status = "rejected", reviewed_at = CURRENT_TIMESTAMP, admin_id = ? WHERE id = ?', (admin_id, report_id))
-        db.commit()
+        db.execute_turso('UPDATE reports SET status = "rejected", reviewed_at = CURRENT_TIMESTAMP, admin_id = ? WHERE id = ?', (admin_id, report_id))
+        db.commit_turso()
         
         current_caption = query.message.caption or query.message.text or ""
         await query.edit_message_caption(
@@ -1488,7 +1515,7 @@ async def dismiss_report_callback(update: Update, context: ContextTypes.DEFAULT_
         )
         await query.answer("✅ Account removed from stock!")
         
-        cur = db.execute('SELECT user_id FROM reports WHERE id = ?', (report_id,))
+        cur = db.execute_turso('SELECT user_id FROM reports WHERE id = ?', (report_id,))
         row = cur.fetchone()
         if row:
             try:
@@ -1510,7 +1537,7 @@ async def dismiss_report_callback(update: Update, context: ContextTypes.DEFAULT_
 
 async def check_force_sub(bot, user_id: int) -> Tuple[bool, List[InlineKeyboardButton]]:
     try:
-        cur = db.execute('SELECT channel_id, channel_name, invite_link FROM channels WHERE is_active = 1')
+        cur = db.execute_turso('SELECT channel_id, channel_name, invite_link FROM channels WHERE is_active = 1')
         channels = cur.fetchall()
         if not channels:
             return True, []
@@ -1741,12 +1768,12 @@ async def working_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_or_edit(update, "⚠️ No active assigned account found. Please click 'Get Account'.")
             return
         
-        db.execute('''
+        db.execute_turso('''
             UPDATE users 
             SET pending_report = 1, pending_report_account_id = ?, pending_report_type = 'working'
             WHERE user_id = ?
         ''', (account_id, user_id))
-        db.commit()
+        db.commit_turso()
         
         await send_or_edit(
             update,
@@ -1784,12 +1811,12 @@ async def notworking_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await send_or_edit(update, "⚠️ No active assigned account found. Please click 'Get Account'.")
             return
         
-        db.execute('''
+        db.execute_turso('''
             UPDATE users 
             SET pending_report = 1, pending_report_account_id = ?, pending_report_type = 'notworking'
             WHERE user_id = ?
         ''', (account_id, user_id))
-        db.commit()
+        db.commit_turso()
         
         await send_or_edit(
             update,
@@ -1852,23 +1879,23 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report_type = safe_str(user_data.get("pending_report_type"))
         
         try:
-            cur = db.execute('''
+            cur = db.execute_turso('''
                 INSERT INTO reports (user_id, account_id, report_type, screenshot_file_id)
                 VALUES (?, ?, ?, ?)
             ''', (user_id, account_id, report_type, file_id))
             report_id = cur.lastrowid
             
             if report_type == "working":
-                db.execute('UPDATE users SET working_reports = working_reports + 1 WHERE user_id = ?', (user_id,))
+                db.execute_turso('UPDATE users SET working_reports = working_reports + 1 WHERE user_id = ?', (user_id,))
             else:
-                db.execute('UPDATE users SET notworking_reports = notworking_reports + 1 WHERE user_id = ?', (user_id,))
+                db.execute_turso('UPDATE users SET notworking_reports = notworking_reports + 1 WHERE user_id = ?', (user_id,))
             
-            db.execute('''
+            db.execute_turso('''
                 UPDATE users 
                 SET pending_report = 0, pending_report_account_id = NULL, pending_report_type = NULL
                 WHERE user_id = ?
             ''', (user_id,))
-            db.commit()
+            db.commit_turso()
         except Exception as e:
             logger.error(f"Error inserting report: {e}")
             await update.message.reply_text("❌ Failed to save report in database.")
@@ -1992,8 +2019,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pending_reps = get_pending_reports()
         
         # Database type display
-        db_type = "Turso (Cloud)" if db.use_turso else "SQLite (Local)"
-        db_emoji = "✅" if db.use_turso else "⚠️"
+        db_type = "Turso (Persistent) + SQLite (Temp)"
+        db_emoji = "✅"
         
         keyboard = [
             [InlineKeyboardButton("📤 Upload Stock", callback_data="admin_upload"), InlineKeyboardButton("📦 Manage Stock", callback_data="admin_stock_mgr")],
@@ -2003,12 +2030,6 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🚫 Banned Users", callback_data="admin_banned"), InlineKeyboardButton("🔍 Search User", callback_data="admin_user_search")],
         ]
         
-        # Database Switch Buttons
-        keyboard.append([
-            InlineKeyboardButton("🔄 Switch to SQLite", callback_data="switch_sqlite"),
-            InlineKeyboardButton("🔄 Switch to Turso", callback_data="switch_turso")
-        ])
-        
         keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")])
         
         text = f"""⚙️ <b>ADMIN CONTROL PANEL</b>
@@ -2017,6 +2038,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ┌─────────────────────
 │ Status: <b>🟢 ONLINE</b>
 │ Database: <b>{db_emoji} {db_type}</b>
+│ Accounts DB: <b>SQLite (temp)</b>
+│ Persistent DB: <b>Turso</b>
 │ Check Threads: <b>{MAX_CHECK_THREADS}</b>
 │ Report Channel: <b>{'✅ Connected' if REPORT_CHANNEL_ID else '❌ Not Configured'}</b>
 └─────────────────────
@@ -2026,92 +2049,12 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 │ 📋 Pending Reports: <b>{len(pending_reps)}</b>
 │ 🚫 Banned Users: <b>{len(banned)}</b>
 └─────────────────────
-🔽 <b>DATABASE SWITCH:</b>
-<i>Switch database type if current one is not saving properly.</i>
 🔽 <b>SELECT ADMIN ACTION:</b>
 👨‍💻 <b>Developer:</b> @Senzo268
 """
         await send_or_edit(update, text, reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         logger.error(f"Error in admin_panel: {e}")
-
-# ============================================================
-# DATABASE SWITCH FUNCTIONS - NEW FEATURE
-# ============================================================
-
-async def switch_to_sqlite(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Switch database to SQLite."""
-    try:
-        query = update.callback_query
-        await query.answer()
-        user_id = query.from_user.id
-        
-        if user_id not in ADMIN_IDS:
-            await query.answer("⛔ Not authorized!", show_alert=True)
-            return
-        
-        # Update environment variable
-        os.environ["TURSO_DATABASE_URL"] = ""
-        os.environ["TURSO_AUTH_TOKEN"] = ""
-        
-        # Reinitialize database
-        global db
-        db = Database()
-        
-        await query.edit_message_text(
-            "✅ <b>Database switched to SQLite (Local)!</b>\n\n"
-            "🔄 Bot will now use SQLite database.\n"
-            "⚠️ Data is stored locally in bot.db file.\n\n"
-            "👨‍💻 <b>Developer:</b> @Senzo268",
-            parse_mode=ParseMode.HTML
-        )
-    except Exception as e:
-        logger.error(f"Error switching to SQLite: {e}")
-        await send_or_edit(update, f"❌ Failed to switch database: {e}")
-
-async def switch_to_turso(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Switch database to Turso."""
-    try:
-        query = update.callback_query
-        await query.answer()
-        user_id = query.from_user.id
-        
-        if user_id not in ADMIN_IDS:
-            await query.answer("⛔ Not authorized!", show_alert=True)
-            return
-        
-        if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
-            await query.edit_message_text(
-                "❌ <b>Turso credentials not configured!</b>\n\n"
-                "Please set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in .env file.\n\n"
-                "👨‍💻 <b>Developer:</b> @Senzo268",
-                parse_mode=ParseMode.HTML
-            )
-            return
-        
-        # Reinitialize database with Turso
-        global db
-        db = Database()
-        
-        if db.use_turso:
-            await query.edit_message_text(
-                "✅ <b>Database switched to Turso (Cloud)!</b>\n\n"
-                "🔄 Bot will now use Turso cloud database.\n"
-                "✅ Data is persistent and won't be lost on redeploy.\n\n"
-                "👨‍💻 <b>Developer:</b> @Senzo268",
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            await query.edit_message_text(
-                "❌ <b>Failed to connect to Turso!</b>\n\n"
-                "⚠️ Check your TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.\n"
-                "⚠️ Make sure your Turso database is active.\n\n"
-                "👨‍💻 <b>Developer:</b> @Senzo268",
-                parse_mode=ParseMode.HTML
-            )
-    except Exception as e:
-        logger.error(f"Error switching to Turso: {e}")
-        await send_or_edit(update, f"❌ Failed to switch database: {e}")
 
 # ============================================================
 # ADMIN STOCK MANAGER & OTHER ADMIN FUNCTIONS
@@ -2439,7 +2382,7 @@ async def view_report_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
         query = update.callback_query
         rep_id = int(query.data.split("_")[2])
-        cur = db.execute('''
+        cur = db.execute_turso('''
             SELECT r.id, r.user_id, r.account_id, r.report_type, r.screenshot_file_id, r.reported_at, u.username, a.email
             FROM reports r
             LEFT JOIN users u ON r.user_id = u.user_id
@@ -2606,8 +2549,8 @@ async def admin_user_actions_callback(update: Update, context: ContextTypes.DEFA
             w = add_warning(target_uid, admin_id, "Warning by Admin action")
             await query.answer(f"⚠️ User warned ({w}/3)!")
         elif action == "reset_user":
-            db.execute('UPDATE users SET accounts_used = 0, last_account_time = NULL WHERE user_id = ?', (target_uid,))
-            db.commit()
+            db.execute_turso('UPDATE users SET accounts_used = 0, last_account_time = NULL WHERE user_id = ?', (target_uid,))
+            db.commit_turso()
             await query.answer("🔄 User limits and cooldown reset!")
             
         await manage_user_detail(update, context)
@@ -2640,7 +2583,7 @@ async def admin_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_or_edit(update, "⛔ Not authorized!")
             return
             
-        cur = db.execute('SELECT id, channel_id, channel_name, invite_link, is_active FROM channels')
+        cur = db.execute_turso('SELECT id, channel_id, channel_name, invite_link, is_active FROM channels')
         channels = cur.fetchall()
         
         text = f"""⚙️ <b>CHANNEL MANAGEMENT</b>
@@ -2687,8 +2630,8 @@ async def del_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         query = update.callback_query
         await query.answer()
         cid = int(query.data.split("_")[2])
-        db.execute('DELETE FROM channels WHERE id = ?', (cid,))
-        db.commit()
+        db.execute_turso('DELETE FROM channels WHERE id = ?', (cid,))
+        db.commit_turso()
         await query.answer("✅ Channel removed!")
         await admin_channels(update, context)
     except Exception as e:
@@ -2726,7 +2669,7 @@ async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users = get_all_users()
         banned = get_banned_users()
         
-        cur = db.execute('SELECT total_hits, total_free, total_bad FROM stats WHERE date = CURRENT_DATE')
+        cur = db.execute_turso('SELECT total_hits, total_free, total_bad FROM stats WHERE date = CURRENT_DATE')
         row = cur.fetchone()
         today_hits = row[0] if row else 0
         today_free = row[1] if row else 0
@@ -2755,7 +2698,9 @@ async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 └─────────────────────
 ⚙️ <b>SYSTEM CONFIG</b>
 ┌─────────────────────
-│ Database Engine: <b>{'Turso DB (Cloud)' if db.use_turso else 'SQLite (Local)'}</b>
+│ Database Engine: <b>Turso (Persistent) + SQLite (Temp)</b>
+│ Accounts DB: <b>SQLite</b>
+│ Persistent DB: <b>Turso</b>
 │ Max Check Threads: <b>{MAX_CHECK_THREADS}</b>
 │ Cooldown: <b>{WORKING_COOLDOWN_MINUTES} min</b>
 │ Max Accounts/User: <b>{MAX_ACCOUNTS_PER_USER}</b>
@@ -2862,8 +2807,8 @@ Username: @{h(user.get('username'))}
             if len(parts) == 3:
                 ch_id, ch_name, ch_link = parts[0], parts[1], parts[2]
                 try:
-                    db.execute('INSERT OR REPLACE INTO channels (channel_id, channel_name, invite_link) VALUES (?, ?, ?)', (ch_id, ch_name, ch_link))
-                    db.commit()
+                    db.execute_turso('INSERT OR REPLACE INTO channels (channel_id, channel_name, invite_link) VALUES (?, ?, ?)', (ch_id, ch_name, ch_link))
+                    db.commit_turso()
                     await update.message.reply_text("✅ Required channel added successfully!", parse_mode=ParseMode.HTML)
                 except Exception as e:
                     await update.message.reply_text(f"❌ Database error: {e}")
@@ -2911,7 +2856,9 @@ def main():
     print("=" * 70)
     print("🎬 SENZO NETFLIX BOT - ULTIMATE FULLY WORKING EDITION")
     print("=" * 70)
-    print(f"📊 Database Engine: {'Turso (PERSISTENT CLOUD)' if db.use_turso else 'SQLite (LOCAL)'}")
+    print(f"📊 Database Engine: Turso (Persistent) + SQLite (Temp)")
+    print(f"📦 Accounts DB: SQLite (wiped on redeploy)")
+    print(f"💾 Persistent DB: Turso (users, reports, logs, stats, channels)")
     print(f"👤 Admin IDs: {ADMIN_IDS}")
     print(f"📢 Report Channel: {REPORT_CHANNEL_ID if REPORT_CHANNEL_ID else 'NOT SET'}")
     print(f"⏳ Cooldown Minutes: {WORKING_COOLDOWN_MINUTES}")
@@ -2968,10 +2915,6 @@ def main():
     application.add_handler(CallbackQueryHandler(del_channel_callback, pattern="^del_channel_"))
     application.add_handler(CallbackQueryHandler(admin_stock_logs, pattern="^admin_stock_logs$"))
     application.add_handler(CallbackQueryHandler(admin_dashboard, pattern="^admin_dashboard$"))
-    
-    # Database Switch Callbacks
-    application.add_handler(CallbackQueryHandler(switch_to_sqlite, pattern="^switch_sqlite$"))
-    application.add_handler(CallbackQueryHandler(switch_to_turso, pattern="^switch_turso$"))
     
     # Channel Action Callbacks
     application.add_handler(CallbackQueryHandler(confirm_working_callback, pattern="^confirm_working_"))
