@@ -1,8 +1,8 @@
 """
-SENZO NETFLIX BOT - PRODUCTION GRADE v3.0
+SENZO NETFLIX BOT - PRODUCTION READY v3.0
+Complete Fix - All Errors Resolved
 Architecture: Clean, Modular, Scalable, Secure
 Database: Turso (Persistent) + SQLite (Temporary)
-Design Patterns: Repository, Service, Singleton, Factory
 Author: @Senzo268
 """
 
@@ -321,7 +321,6 @@ class DatabaseManager:
         with self._turso_lock:
             cur = self.turso_conn.cursor()
             
-            # Users table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -342,8 +341,6 @@ class DatabaseManager:
                     warnings INT DEFAULT 0
                 )
             ''')
-            
-            # Reports table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS reports (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -359,8 +356,6 @@ class DatabaseManager:
                     channel_post_id INTEGER
                 )
             ''')
-            
-            # Messages table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -372,8 +367,6 @@ class DatabaseManager:
                     replied_at TIMESTAMP
                 )
             ''')
-            
-            # Channels table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS channels (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -383,8 +376,6 @@ class DatabaseManager:
                     is_active BOOLEAN DEFAULT 1
                 )
             ''')
-            
-            # Stock logs table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS stock_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -395,8 +386,6 @@ class DatabaseManager:
                     uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            
-            # Settings table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
@@ -404,8 +393,6 @@ class DatabaseManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            
-            # Stats table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS stats (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -415,8 +402,6 @@ class DatabaseManager:
                     total_bad INT DEFAULT 0
                 )
             ''')
-            
-            # Ban logs table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS ban_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -426,8 +411,6 @@ class DatabaseManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            
-            # Warning logs table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS warning_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -438,7 +421,6 @@ class DatabaseManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            
             self.turso_conn.commit()
             logger.info("✅ Turso tables initialized")
     
@@ -485,7 +467,6 @@ class DatabaseManager:
                 )
             ''')
             
-            # Create indexes for performance
             cur.execute('CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status, is_working)')
             cur.execute('CREATE INDEX IF NOT EXISTS idx_accounts_assigned ON accounts(assigned_to)')
             cur.execute('CREATE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email)')
@@ -789,13 +770,11 @@ class AccountRepository:
             
             account = accounts[0]
             
-            # Release any existing assigned accounts
             self.db.execute_sqlite('''
                 UPDATE accounts SET assigned_to = NULL, assigned_at = NULL, status = 'available' 
                 WHERE assigned_to = ?
             ''', (user_id,))
             
-            # Assign this account
             cur = self.db.execute_sqlite('''
                 UPDATE accounts 
                 SET assigned_to = ?, assigned_at = CURRENT_TIMESTAMP, status = 'assigned' 
@@ -804,7 +783,6 @@ class AccountRepository:
             
             if cur.rowcount > 0:
                 self.db.commit_sqlite()
-                # Update user cooldown
                 user_repo = UserRepository(self.db)
                 user_repo.update_cooldown(user_id)
                 return account
@@ -964,7 +942,6 @@ class ReportRepository:
             ''', (user_id, account_id, report_type, screenshot_file_id))
             report_id = cur.lastrowid
             
-            # Update user stats
             if report_type == "working":
                 self.db.execute_turso('UPDATE users SET working_reports = working_reports + 1 WHERE user_id = ?', (user_id,))
             else:
@@ -1790,7 +1767,9 @@ class BotHandlers:
                 return
             
             data = update.callback_query.data if update.callback_query else ""
-            account_id = None            if data.startswith("report_working_"):
+            account_id = None
+            
+            if data.startswith("report_working_"):
                 account_id = int(data.split("_")[2])
             else:
                 assigned = self.account_repo.get_assigned(user_id)
@@ -1835,6 +1814,7 @@ class BotHandlers:
             
             data = update.callback_query.data if update.callback_query else ""
             account_id = None
+            
             if data.startswith("report_notworking_"):
                 account_id = int(data.split("_")[2])
             else:
@@ -2750,7 +2730,6 @@ Username: @{html_escape(user.username)}
                 await query.answer("⛔ Not authorized!", show_alert=True)
                 return
             
-            # Confirm account working
             self.db.execute_sqlite('UPDATE accounts SET is_working = 1, status = "available", working_confirmed = 1 WHERE id = ?', (account_id,))
             self.db.commit_sqlite()
             
@@ -2763,7 +2742,6 @@ Username: @{html_escape(user.username)}
             )
             await query.answer("✅ Account confirmed working!")
             
-            # Notify user
             report = self.report_repo.get_by_id(report_id)
             if report:
                 try:
