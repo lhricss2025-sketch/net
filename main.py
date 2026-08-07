@@ -244,7 +244,7 @@ def retry_on_failure(max_retries: int = 3, delay: float = 1.0):
     return decorator
 
 # ============================================================
-# ADVANCED COOKIE EXTRACTION (From Reference Code)
+# ADVANCED COOKIE EXTRACTION
 # ============================================================
 class CookieExtractor:
     """Advanced cookie extraction with multiple formats."""
@@ -405,7 +405,6 @@ class CookieExtractor:
 class NetflixService:
     NFTOKEN_API_URL = "https://ios.prod.ftl.netflix.com/iosui/user/15.48"
     
-    # Advanced plan aliases from reference code
     PLAN_ALIASES = {
         "premium": {
             "premium", "高級", "高级", "cao_cap", "ozel", "المميزة", 
@@ -424,7 +423,6 @@ class NetflixService:
         },
     }
     
-    # Month aliases for date parsing
     MONTH_ALIASES = {
         "january": 1, "enero": 1, "janvier": 1, "januar": 1, "janeiro": 1,
         "february": 2, "febrero": 2, "fevrier": 2, "fevereiro": 2,
@@ -454,7 +452,6 @@ class NetflixService:
     
     @staticmethod
     def decode_value(value: Any) -> Optional[str]:
-        """Decode Netflix value with Unicode handling."""
         if value is None:
             return None
         cleaned = html.unescape(str(value))
@@ -476,10 +473,8 @@ class NetflixService:
     
     @staticmethod
     def parse_account_page(response_text: str) -> Dict:
-        """Advanced account parsing with GraphQL + fallback."""
         info = {}
         
-        # Try GraphQL parsing
         try:
             data = json.loads(response_text)
             if "data" in data and "growthAccount" in data["data"]:
@@ -510,7 +505,6 @@ class NetflixService:
         except:
             pass
         
-        # Fallback: Regex extraction
         if not info.get("email"):
             email_match = re.search(r'"emailAddress"\s*:\s*"([^"]+)"', response_text)
             if email_match:
@@ -532,7 +526,6 @@ class NetflixService:
             if plan_match:
                 info["localizedPlanName"] = plan_match.group(1)
         
-        # Extra member detection
         extra_patterns = (
             r"assinante\s+extra\s+no\s+plano\s+de\s+outra\s+pessoa",
             r"suscriptor\s+extra\s+en\s+el\s+plan\s+de\s+otra\s+persona",
@@ -578,12 +571,10 @@ class NetflixService:
         streams = safe_int(info.get("maxStreams"))
         quality = safe_str(info.get("videoQuality", "")).lower()
         
-        # Check plan aliases
         for key, aliases in NetflixService.PLAN_ALIASES.items():
             if any(alias in plan_name for alias in aliases):
                 return key, key.capitalize()
         
-        # Derive from streams/quality
         if streams >= 4 or "uhd" in quality or "4k" in quality:
             return "premium", "Premium"
         elif streams >= 2 or "hd" in quality:
@@ -613,21 +604,19 @@ class NetflixService:
         if not cleaned:
             return "N/A"
         try:
-            # Try ISO format
             for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
                 try:
                     dt = datetime.strptime(cleaned[:19], fmt)
                     return dt.strftime("%B %d, %Y")
                 except:
                     continue
-            # Try localized
             cleaned_lower = cleaned.lower()
             for alias, month in NetflixService.MONTH_ALIASES.items():
                 if alias in cleaned_lower:
                     year_match = re.search(r'\b(\d{4})\b', cleaned)
                     if year_match:
                         year = int(year_match.group(1))
-                        if 2400 <= year <= 2700:  # Thai calendar
+                        if 2400 <= year <= 2700:
                             year -= 543
                         try:
                             dt = datetime(year, month, 1)
@@ -730,6 +719,9 @@ class NetflixService:
         
         return None, None
     
+    # ============================================================
+    # FIXED check_account FUNCTION - LINE 808 ERROR FIXED
+    # ============================================================
     @staticmethod
     def check_account(cookies_dict: Dict) -> Dict:
         """Enhanced account checker with advanced parsing."""
@@ -805,7 +797,8 @@ class NetflixService:
                                     "nftoken_expiry": nftoken_expiry,
                                 }
                         elif response.status_code == 403:
-                            continue                        elif response.status_code == 429:
+                            continue
+                        elif response.status_code == 429:
                             time.sleep(1)
                             continue
                             
